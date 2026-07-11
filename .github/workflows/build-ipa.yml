@@ -1,0 +1,61 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned device app
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project PSLScanner.xcodeproj \
+            -scheme PSLScanner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+
+          APP_PATH="$(find "$PWD/build/Build/Products/Release-iphoneos" \
+            -maxdepth 1 \
+            -name '*.app' \
+            -type d | head -n 1)"
+
+          test -n "$APP_PATH"
+
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+
+          zip -qry PSLScanner-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PSLScanner-unsigned
+          path: PSLScanner-unsigned.ipa
+          retention-days: 14
