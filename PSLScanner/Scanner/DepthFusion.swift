@@ -69,7 +69,6 @@ enum DepthFusionEngine {
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
 
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
-        let byteBase = baseAddress.assumingMemoryBound(to: UInt8.self)
 
         func sampleDepth(x: Int, y: Int) -> Float? {
             guard x >= 1, y >= 1, x < width - 1, y < height - 1 else { return nil }
@@ -78,8 +77,9 @@ enum DepthFusionEngine {
             values.reserveCapacity(9)
 
             for dy in -1...1 {
-                let rowAddress = byteBase.advanced(by: (y + dy) * bytesPerRow)
-                let row = rowAddress.assumingMemoryBound(to: Float.self)
+                let row = baseAddress
+                    .advanced(by: (y + dy) * bytesPerRow)
+                    .assumingMemoryBound(to: Float.self)
 
                 for dx in -1...1 {
                     let value = row[x + dx]

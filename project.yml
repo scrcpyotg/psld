@@ -9,8 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-    MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "4"
+    MARKETING_VERSION: "0.3.1"
+    CURRENT_PROJECT_VERSION: "5"
 
 targets:
   PSLScanner:
@@ -22,8 +22,8 @@ targets:
       base:
         PRODUCT_NAME: PSLScanner
         PRODUCT_BUNDLE_IDENTIFIER: com.psllens.scanner
-        MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.1"
+        CURRENT_PROJECT_VERSION: "5"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: PSL Scanner
         INFOPLIST_KEY_NSCameraUsageDescription: Камера TrueDepth используется для локального трёхмерного сканирования поверхности лица.
