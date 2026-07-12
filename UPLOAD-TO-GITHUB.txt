@@ -1,0 +1,15 @@
+ОБНОВЛЕНИЕ PSL SCANNER ДО V0.2
+
+1. Распакуйте архив.
+2. Откройте репозиторий scrcpyotg/psld.
+3. Add file -> Upload files.
+4. Перетащите ВСЁ содержимое распакованной папки.
+5. Разрешите замену существующих файлов и нажмите Commit changes.
+6. Откройте Actions и дождитесь Build unsigned IPA.
+7. Скачайте артефакт PSLScanner-unsigned.
+
+Проверьте, что загрузились новые файлы:
+- PSLScanner/UI/ResultsView.swift
+- PSLScanner/UI/MeshPreviewView.swift
+- PSLScanner/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+- scripts/generate_icon.py
