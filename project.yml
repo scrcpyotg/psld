@@ -22,6 +22,8 @@ targets:
       base:
         PRODUCT_NAME: PSLScanner
         PRODUCT_BUNDLE_IDENTIFIER: com.psllens.scanner
+        MARKETING_VERSION: "0.2.1"
+        CURRENT_PROJECT_VERSION: "3"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: PSL Scanner
         INFOPLIST_KEY_NSCameraUsageDescription: Камера TrueDepth используется для локального трёхмерного сканирования поверхности лица.

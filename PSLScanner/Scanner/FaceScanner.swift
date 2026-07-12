@@ -39,79 +39,163 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
     private var depthFrames = 0
     private var totalObservedFrames = 0
 
+    // UI/lifecycle watchdog. These values are read and changed on the main queue.
+    private var scanAttemptID: UUID?
+    private var watchdogAcceptedFrames = 0
+    private var watchdogMisses = 0
+
     private let targetFrameCount = 100
     private let maximumFrameCount = 170
     private let minimumSampleInterval: TimeInterval = 0.075
 
     func attach(to view: ARSCNView) {
+        if let currentView = sceneView, currentView !== view {
+            currentView.session.pause()
+        }
+
         sceneView = view
         view.scene = SCNScene()
         view.automaticallyUpdatesLighting = true
         view.session.delegate = self
         view.session.delegateQueue = sessionQueue
 
-        DispatchQueue.main.async {
-            UIApplication.shared.isIdleTimerDisabled = true
-        }
+        UIApplication.shared.isIdleTimerDisabled = true
 
         guard ARFaceTrackingConfiguration.isSupported else {
-            publish {
-                self.state = .unsupported
-                self.statusText = "ARKit Face Tracking не поддерживается на этом устройстве."
-            }
+            state = .unsupported
+            statusText = "ARKit Face Tracking не поддерживается на этом устройстве."
             return
         }
 
-        runSession(reset: true)
+        runSession(reset: true, updateState: true)
+    }
+
+    func detach(from view: ARSCNView) {
+        view.session.pause()
+
+        if sceneView === view {
+            sceneView = nil
+        }
+
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
     func pauseSession() {
-        sceneView?.session.pause()
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            self?.sceneView?.session.pause()
             UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
-    func startScan() {
-        sessionQueue.async {
-            self.samples.removeAll(keepingCapacity: true)
-            self.triangleIndices.removeAll(keepingCapacity: true)
-            self.lastAcceptedTimestamp = 0
-            self.yawMinimum = .greatestFiniteMagnitude
-            self.yawMaximum = -.greatestFiniteMagnitude
-            self.depthFrames = 0
-            self.totalObservedFrames = 0
-            self.collecting = true
+    func handleAppBecameActive() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+            guard let self else { return }
+            UIApplication.shared.isIdleTimerDisabled = true
 
-            self.publish {
-                self.state = .scanning
-                self.statusText = "Смотри прямо, затем медленно поверни голову в обе стороны."
-                self.progress = 0
-                self.acceptedFrames = 0
-                self.rejectedFrames = 0
-                self.trueDepthDetected = false
-                self.summary = nil
-                self.resultDocument = nil
-                self.exportURL = nil
+            let shouldUpdateState: Bool
+            switch self.state {
+            case .scanning, .processing, .complete:
+                shouldUpdateState = false
+            default:
+                shouldUpdateState = true
             }
+
+            self.runSession(reset: true, updateState: shouldUpdateState)
+        }
+    }
+
+    func handleAppBecameInactive() {
+        sessionQueue.async { [weak self] in
+            self?.collecting = false
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanAttemptID = nil
+
+            if self.state == .scanning {
+                self.state = .failed("Сканирование было прервано системой.")
+                self.statusText = "Вернись в приложение и запусти скан повторно."
+                self.progress = 0
+            }
+        }
+
+        pauseSession()
+    }
+
+    func startScan() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            guard ARFaceTrackingConfiguration.isSupported else {
+                self.state = .unsupported
+                self.statusText = "На устройстве нет поддержки ARKit Face Tracking."
+                return
+            }
+
+            guard self.sceneView != nil else {
+                self.state = .failed("Камера ещё не готова.")
+                self.statusText = "Подожди секунду и нажми кнопку ещё раз."
+                return
+            }
+
+            let attemptID = UUID()
+            self.scanAttemptID = attemptID
+            self.watchdogAcceptedFrames = 0
+            self.watchdogMisses = 0
+
+            // UI reacts immediately instead of waiting for the AR delegate queue.
+            self.state = .scanning
+            self.statusText = "Смотри прямо, затем медленно поверни голову в обе стороны."
+            self.progress = 0
+            self.acceptedFrames = 0
+            self.rejectedFrames = 0
+            self.trueDepthDetected = false
+            self.summary = nil
+            self.resultDocument = nil
+            self.exportURL = nil
+
+            self.sessionQueue.async {
+                self.samples.removeAll(keepingCapacity: true)
+                self.triangleIndices.removeAll(keepingCapacity: true)
+                self.lastAcceptedTimestamp = 0
+                self.yawMinimum = .greatestFiniteMagnitude
+                self.yawMaximum = -.greatestFiniteMagnitude
+                self.depthFrames = 0
+                self.totalObservedFrames = 0
+                self.collecting = true
+            }
+
+            // A paused/interrupted ARSession is explicitly resumed on every tap.
+            self.runSession(reset: false, updateState: false)
+            self.armProgressWatchdog(for: attemptID)
         }
     }
 
     func cancelScan() {
-        sessionQueue.async {
-            self.collecting = false
-            self.publish {
-                self.state = .ready
-                self.statusText = "Сканирование отменено."
-                self.progress = 0
-            }
+        sessionQueue.async { [weak self] in
+            self?.collecting = false
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanAttemptID = nil
+            self.state = .ready
+            self.statusText = "Сканирование отменено."
+            self.progress = 0
         }
     }
 
     func resetForNewScan() {
-        collecting = false
-        pauseSession()
-        publish {
+        sessionQueue.async { [weak self] in
+            self?.collecting = false
+        }
+
+        // Do not pause here: the capture view is recreated right after this state change.
+        // Pausing in the old implementation could race with the newly attached ARSession.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanAttemptID = nil
             self.state = .ready
             self.statusText = "Готово. Держи iPhone вертикально на расстоянии 30–50 см."
             self.progress = 0
@@ -124,22 +208,66 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    private func runSession(reset: Bool) {
-        guard let sceneView else { return }
+    private func runSession(reset: Bool, updateState: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let sceneView = self.sceneView else { return }
 
-        let configuration = ARFaceTrackingConfiguration()
-        configuration.isLightEstimationEnabled = true
-        configuration.maximumNumberOfTrackedFaces = 1
+            guard ARFaceTrackingConfiguration.isSupported else {
+                self.state = .unsupported
+                self.statusText = "ARKit Face Tracking не поддерживается на этом устройстве."
+                return
+            }
 
-        let options: ARSession.RunOptions = reset
-            ? [.resetTracking, .removeExistingAnchors]
-            : []
+            let configuration = ARFaceTrackingConfiguration()
+            configuration.isLightEstimationEnabled = true
+            configuration.maximumNumberOfTrackedFaces = 1
 
-        sceneView.session.run(configuration, options: options)
+            let options: ARSession.RunOptions = reset
+                ? [.resetTracking, .removeExistingAnchors]
+                : []
 
-        publish {
-            self.state = .ready
-            self.statusText = "Готово. Держи iPhone вертикально на расстоянии 30–50 см."
+            sceneView.session.run(configuration, options: options)
+            UIApplication.shared.isIdleTimerDisabled = true
+
+            guard updateState else { return }
+
+            switch self.state {
+            case .scanning, .processing, .complete:
+                break
+            default:
+                self.state = .ready
+                self.statusText = "Готово. Держи iPhone вертикально на расстоянии 30–50 см."
+            }
+        }
+    }
+
+    private func armProgressWatchdog(for attemptID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            guard let self else { return }
+            guard self.scanAttemptID == attemptID, self.state == .scanning else { return }
+
+            if self.acceptedFrames == self.watchdogAcceptedFrames {
+                self.watchdogMisses += 1
+
+                if self.watchdogMisses == 1 {
+                    self.statusText = "TrueDepth не присылает новые кадры. Перезапускаем камеру…"
+                    self.runSession(reset: true, updateState: false)
+                } else {
+                    self.scanAttemptID = nil
+                    self.sessionQueue.async {
+                        self.collecting = false
+                    }
+                    self.state = .failed("Камера перестала присылать кадры.")
+                    self.statusText = "Нажми «Начать 3D-скан» ещё раз."
+                    self.progress = 0
+                    return
+                }
+            } else {
+                self.watchdogAcceptedFrames = self.acceptedFrames
+                self.watchdogMisses = 0
+            }
+
+            self.armProgressWatchdog(for: attemptID)
         }
     }
 
@@ -250,17 +378,30 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, didFailWithError error: Error) {
         collecting = false
         publish {
+            self.scanAttemptID = nil
             self.state = .failed(error.localizedDescription)
-            self.statusText = "AR-сессия завершилась с ошибкой."
+            self.statusText = "AR-сессия завершилась с ошибкой. Нажми кнопку для повтора."
+            self.progress = 0
         }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
-        publishStatus("Сканирование приостановлено системой.")
+        collecting = false
+        publish {
+            self.scanAttemptID = nil
+
+            if self.state == .scanning {
+                self.state = .failed("Сканирование было прервано системой.")
+                self.statusText = "Камера была приостановлена. Нажми кнопку для нового скана."
+                self.progress = 0
+            } else {
+                self.statusText = "Камера временно приостановлена системой."
+            }
+        }
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
-        runSession(reset: true)
+        runSession(reset: true, updateState: true)
     }
 
     private func finishScan(session: ARSession) {
@@ -276,6 +417,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         let observed = max(totalObservedFrames, 1)
 
         publish {
+            self.scanAttemptID = nil
             self.state = .processing
             self.statusText = "Усредняем 3D-сетку и считаем поверхностные прокси…"
             self.progress = 1

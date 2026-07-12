@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var scanner: FaceScanner
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -16,6 +17,16 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.28), value: scanner.state)
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
+            case .active:
+                scanner.handleAppBecameActive()
+            case .inactive, .background:
+                scanner.handleAppBecameInactive()
+            @unknown default:
+                break
+            }
+        }
     }
 }
 
@@ -27,6 +38,7 @@ private struct ScannerCaptureView: View {
         ZStack {
             ARFaceView(scanner: scanner)
                 .ignoresSafeArea()
+                .allowsHitTesting(false)
 
             LinearGradient(
                 colors: [
