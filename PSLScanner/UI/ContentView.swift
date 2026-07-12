@@ -70,7 +70,7 @@ private struct ScannerCaptureView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("PSL SCANNER")
                     .font(.system(size: 18, weight: .black, design: .rounded))
-                Text("TrueDepth Depth Fusion · обработка на устройстве")
+                Text("TrueDepth · guided scan · серия \(scanner.completedReliabilityScans + 1)/\(scanner.requiredReliabilityScans)")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
             }
@@ -163,8 +163,8 @@ private struct ScannerCaptureView: View {
             if scanner.state == .ready {
                 HStack(spacing: 12) {
                     scanRule(icon: "iphone", text: "30–50 см")
-                    scanRule(icon: "face.smiling.inverse", text: "Нейтрально")
-                    scanRule(icon: "light.max", text: "Ровный свет")
+                    scanRule(icon: "arrow.left.and.right", text: "5 позиций")
+                    scanRule(icon: "repeat", text: "3 скана")
                 }
             }
 
@@ -204,7 +204,7 @@ private struct ScannerCaptureView: View {
             Button {
                 scanner.startScan()
             } label: {
-                Label("Начать 3D-скан", systemImage: "faceid")
+                Label("Начать скан \(scanner.completedReliabilityScans + 1) из \(scanner.requiredReliabilityScans)", systemImage: "faceid")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(ScannerPrimaryButtonStyle(accent: accent))

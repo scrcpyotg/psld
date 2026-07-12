@@ -26,6 +26,10 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var summary: ScanSummary?
     @Published private(set) var resultDocument: FaceScanDocument?
     @Published private(set) var exportURL: URL?
+    @Published private(set) var objExportURL: URL?
+    @Published private(set) var plyExportURL: URL?
+    @Published private(set) var completedReliabilityScans = 0
+    let requiredReliabilityScans = ReliabilityAnalyzer.requiredScanCount
 
     private weak var sceneView: ARSCNView?
     private let sessionQueue = DispatchQueue(label: "com.psllens.scanner.session", qos: .userInitiated)
@@ -41,14 +45,15 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
     private var depthFrames = 0
     private var rawDepthFrames = 0
     private var totalObservedFrames = 0
+    private var guidedPoseTracker = GuidedPoseTracker()
+    private var reliabilityDocuments = [FaceScanDocument]()
 
     // UI/lifecycle watchdog. These values are read and changed on the main queue.
     private var scanAttemptID: UUID?
     private var watchdogAcceptedFrames = 0
     private var watchdogMisses = 0
 
-    private let targetFrameCount = 100
-    private let maximumFrameCount = 170
+    private var targetFrameCount: Int { guidedPoseTracker.totalTarget }
     private let minimumSampleInterval: TimeInterval = 0.075
 
     func attach(to view: ARSCNView) {
@@ -158,6 +163,8 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             self.summary = nil
             self.resultDocument = nil
             self.exportURL = nil
+            self.objExportURL = nil
+            self.plyExportURL = nil
 
             self.sessionQueue.async {
                 self.samples.removeAll(keepingCapacity: true)
@@ -169,6 +176,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
                 self.depthFrames = 0
                 self.rawDepthFrames = 0
                 self.totalObservedFrames = 0
+                self.guidedPoseTracker.reset()
                 self.collecting = true
             }
 
@@ -194,16 +202,42 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
     func resetForNewScan() {
         sessionQueue.async { [weak self] in
-            self?.collecting = false
+            guard let self else { return }
+            self.collecting = false
+            self.guidedPoseTracker.reset()
+        }
+
+        analysisQueue.async { [weak self] in
+            self?.reliabilityDocuments.removeAll()
         }
 
         // Do not pause here: the capture view is recreated right after this state change.
-        // Pausing in the old implementation could race with the newly attached ARSession.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.scanAttemptID = nil
             self.state = .ready
-            self.statusText = "Готово. Держи iPhone вертикально на расстоянии 30–50 см."
+            self.statusText = "Готово. Начни новую серию из трёх сканов."
+            self.progress = 0
+            self.acceptedFrames = 0
+            self.rejectedFrames = 0
+            self.capturedDepthFrames = 0
+            self.trueDepthDetected = false
+            self.completedReliabilityScans = 0
+            self.summary = nil
+            self.resultDocument = nil
+            self.exportURL = nil
+            self.objExportURL = nil
+            self.plyExportURL = nil
+        }
+    }
+
+    func continueReliabilitySeries() {
+        guard completedReliabilityScans < requiredReliabilityScans else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.state = .ready
+            self.statusText = "Контрольный скан \(self.completedReliabilityScans + 1) из \(self.requiredReliabilityScans)."
             self.progress = 0
             self.acceptedFrames = 0
             self.rejectedFrames = 0
@@ -212,7 +246,35 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             self.summary = nil
             self.resultDocument = nil
             self.exportURL = nil
+            self.objExportURL = nil
+            self.plyExportURL = nil
+
+            self.startScanWhenCameraReady(remainingAttempts: 8)
         }
+    }
+
+    private func startScanWhenCameraReady(remainingAttempts: Int) {
+        guard remainingAttempts > 0 else {
+            state = .failed("Камера не успела подготовиться.")
+            statusText = "Нажми кнопку начала скана ещё раз."
+            return
+        }
+
+        if sceneView != nil {
+            runSession(reset: true, updateState: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+                self?.startScan()
+            }
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+            self?.startScanWhenCameraReady(remainingAttempts: remainingAttempts - 1)
+        }
+    }
+
+    var exportURLs: [URL] {
+        [exportURL, objExportURL, plyExportURL].compactMap { $0 }
     }
 
     private func runSession(reset: Bool, updateState: Bool) {
@@ -338,6 +400,15 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             return
         }
 
+        let poseDecision = guidedPoseTracker.evaluate(yaw: yaw)
+        guard poseDecision.acceptFrame else {
+            publish {
+                self.statusText = poseDecision.status
+                self.progress = poseDecision.progress
+            }
+            return
+        }
+
         let vertices = face.geometry.vertices.map {
             SIMD3<Float>($0.x, $0.y, $0.z)
         }
@@ -375,25 +446,15 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         yawMaximum = max(yawMaximum, yaw)
 
         let count = samples.count
-        let coverage = max(0, yawMaximum - yawMinimum)
-        let framePart = min(1.0, Double(count) / Double(targetFrameCount))
-        let coveragePart = min(1.0, Double(coverage / 0.42))
-        let progressValue = min(0.99, framePart * 0.76 + coveragePart * 0.24)
+        let progressValue = poseDecision.completed ? 1 : poseDecision.progress
 
         publish {
             self.acceptedFrames = count
             self.progress = progressValue
-            self.statusText = self.guidanceText(
-                count: count,
-                yawMin: self.yawMinimum,
-                yawMax: self.yawMaximum
-            )
+            self.statusText = poseDecision.status
         }
 
-        let hasCoverage = yawMinimum < -0.17 && yawMaximum > 0.17
-        if count >= targetFrameCount && hasCoverage {
-            finishScan(session: session)
-        } else if count >= maximumFrameCount {
+        if poseDecision.completed {
             finishScan(session: session)
         }
     }
@@ -469,22 +530,39 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
                     observedFrames: observed
                 )
 
+                self.reliabilityDocuments.append(result.document)
+                if self.reliabilityDocuments.count > self.requiredReliabilityScans {
+                    self.reliabilityDocuments = Array(
+                        self.reliabilityDocuments.suffix(self.requiredReliabilityScans)
+                    )
+                }
+
+                let consolidated = ReliabilityAnalyzer.consolidate(
+                    documents: self.reliabilityDocuments,
+                    requiredScanCount: self.requiredReliabilityScans
+                )
+
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 encoder.dateEncodingStrategy = .iso8601
-                let data = try encoder.encode(result.document)
+                let data = try encoder.encode(consolidated.document)
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                let fileName = "PSL-TrueDepth-v3-\(formatter.string(from: Date())).json"
+                let fileName = "PSL-TrueDepth-v4-\(formatter.string(from: Date())).json"
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
                 try data.write(to: url, options: .atomic)
+                let objURL = try MeshExporter.writeOBJ(document: consolidated.document)
+                let plyURL = try MeshExporter.writePLY(document: consolidated.document)
 
                 self.publish {
-                    self.statusText = "3D-скан готов. Результат рассчитан локально."
-                    self.summary = result.summary
-                    self.resultDocument = result.document
+                    self.statusText = consolidated.document.metrics.repeatability.status
+                    self.completedReliabilityScans = consolidated.document.metrics.repeatability.scanCount
+                    self.summary = consolidated.summary
+                    self.resultDocument = consolidated.document
                     self.exportURL = url
+                    self.objExportURL = objURL
+                    self.plyExportURL = plyURL
                     self.state = .complete
                 }
             } catch {
@@ -613,6 +691,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             scoreRangeLow: analysis.scoreRangeLow,
             scoreRangeHigh: analysis.scoreRangeHigh,
             category: analysis.category,
+            categoryIsFinal: false,
             symmetryErrorMM: symmetryErrorMM,
             stabilityErrorMM: stabilityErrorMM,
             widthMM: widthMM,
@@ -625,6 +704,11 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             rejectedFrames: rejectedFrames,
             depthFrames: depthFrames,
             depthFusion: fusion.metrics,
+            repeatability: RepeatabilityMetrics.pending(
+                scanCount: 1,
+                requiredScanCount: requiredReliabilityScans,
+                vertexCount: vertexCount
+            ),
             featureMetrics: analysis.features,
             warnings: analysis.warnings
         )
@@ -637,8 +721,8 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         }
 
         let document = FaceScanDocument(
-            format: "psl-truedepth-depth-fused-mesh",
-            version: 3,
+            format: "psl-truedepth-guided-scan",
+            version: 4,
             createdAt: Date(),
             deviceModel: deviceModel(),
             operatingSystem: UIDevice.current.systemVersion,
@@ -660,6 +744,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             scoreRangeLow: analysis.scoreRangeLow,
             scoreRangeHigh: analysis.scoreRangeHigh,
             category: analysis.category,
+            categoryIsFinal: false,
             symmetryErrorMM: symmetryErrorMM,
             stabilityErrorMM: stabilityErrorMM,
             widthMM: widthMM,
@@ -668,6 +753,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             yawCoverageDegrees: yawCoverageDegrees,
             acceptedFrames: samples.count,
             depthFusion: fusion.metrics,
+            repeatability: metrics.repeatability,
             featureMetrics: analysis.features,
             warnings: analysis.warnings
         )

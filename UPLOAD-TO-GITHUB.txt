@@ -1,20 +1,10 @@
-PSL Scanner v0.3 — обновление через GitHub
+PSL Scanner v0.4
 
-1. Распакуйте архив psl-scanner-ios-v0.3-update.zip.
-2. В репозитории откройте Code → Add file → Upload files.
+1. Распакуйте psl-scanner-ios-v0.4-update.zip.
+2. GitHub → Code → Add file → Upload files.
 3. Перетащите всё содержимое распакованной папки.
-4. Разрешите замену существующих файлов.
-5. Нажмите Commit changes.
-6. GitHub Actions автоматически соберёт новую unsigned IPA.
+4. Нажмите Commit changes.
+5. Дождитесь зелёной сборки во вкладке Actions.
+6. Скачайте новый artifact PSLScanner-unsigned.
 
-Изменённые файлы:
-- PSLScanner/Scanner/DepthFusion.swift
-- PSLScanner/Scanner/FaceScanner.swift
-- PSLScanner/Models/ScanDocument.swift
-- PSLScanner/UI/ContentView.swift
-- PSLScanner/UI/ResultsView.swift
-- PSLScanner/UI/MeshPreviewView.swift
-- project.yml
-- README-RU.md
-
-Workflow build-ipa.yml менять не нужно.
+Старый build-ipa.yml менять не требуется.

@@ -6,7 +6,8 @@ struct ResultsView: View {
     let document: FaceScanDocument
 
     @State private var showingShareSheet = false
-    @State private var showBaseMesh = false
+    @State private var shareItems = [Any]()
+    @State private var meshMode: MeshDisplayMode = .fused
     private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
 
     var body: some View {
@@ -17,6 +18,7 @@ struct ResultsView: View {
                 VStack(spacing: 18) {
                     topBar
                     scoreHero
+                    repeatabilitySection
                     meshCard
                     depthFusionSection
                     componentSection
@@ -36,9 +38,7 @@ struct ResultsView: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showingShareSheet) {
-            if let url = scanner.exportURL {
-                ShareSheet(items: [url])
-            }
+            ShareSheet(items: shareItems)
         }
     }
 
@@ -61,7 +61,7 @@ struct ResultsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("RESULTS")
                     .font(.system(size: 20, weight: .black, design: .rounded))
-                Text("TrueDepth depth-fused surface analysis")
+                Text("TrueDepth · серия \(summary.repeatability.scanCount)/\(summary.repeatability.requiredScanCount)")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -69,7 +69,7 @@ struct ResultsView: View {
             Spacer()
 
             Button {
-                showingShareSheet = true
+                shareAllExports()
             } label: {
                 Image(systemName: "square.and.arrow.up")
                     .font(.headline)
@@ -77,7 +77,7 @@ struct ResultsView: View {
                     .background(.white.opacity(0.08), in: Circle())
             }
             .foregroundStyle(.white)
-            .disabled(scanner.exportURL == nil)
+            .disabled(scanner.exportURLs.isEmpty)
         }
     }
 
@@ -85,7 +85,7 @@ struct ResultsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("ЭКСПЕРИМЕНТАЛЬНЫЙ PSL")
+                    Text(summary.categoryIsFinal ? "ИТОГОВЫЙ PSL" : "ПРЕДВАРИТЕЛЬНЫЙ PSL")
                         .font(.caption2.bold())
                         .foregroundStyle(accent)
 
@@ -103,11 +103,13 @@ struct ResultsView: View {
 
                 VStack(alignment: .trailing, spacing: 8) {
                     Text(summary.category)
-                        .font(.system(size: 22, weight: .black, design: .rounded))
+                        .font(.system(size: summary.category.count > 8 ? 13 : 22, weight: .black, design: .rounded))
                         .foregroundStyle(.black)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 8)
-                        .background(accent, in: Capsule())
+                        .background(categoryColor, in: Capsule())
 
                     reliabilityBadge
                 }
@@ -132,6 +134,67 @@ struct ResultsView: View {
         .overlay(cardBorder)
     }
 
+    private var repeatabilitySection: some View {
+        let repeatability = summary.repeatability
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                sectionTitle("Scan Reliability", icon: "checkmark.shield")
+                Spacer()
+
+                Text(repeatability.complete ? (repeatability.passed ? "PASSED" : "FAILED") : "\(repeatability.scanCount)/\(repeatability.requiredScanCount)")
+                    .font(.caption2.bold())
+                    .foregroundStyle(repeatability.passed ? Color.black : repeatabilityColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        repeatability.passed ? accent : repeatabilityColor.opacity(0.14),
+                        in: Capsule()
+                    )
+            }
+
+            Text(repeatability.status)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.68))
+                .fixedSize(horizontal: false, vertical: true)
+
+            ProgressView(
+                value: Double(repeatability.scanCount),
+                total: Double(max(repeatability.requiredScanCount, 1))
+            )
+            .tint(repeatability.passed ? accent : repeatabilityColor)
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ],
+                spacing: 10
+            ) {
+                measurementTile("Повторяемость", repeatability.scanCount >= 2 ? "\(repeatability.score)/100" : "—")
+                measurementTile("Медиана", repeatability.scanCount >= 2 ? String(format: "%.2f мм", repeatability.medianVertexDeviationMM) : "—")
+                measurementTile("P90", repeatability.scanCount >= 2 ? String(format: "%.2f мм", repeatability.p90VertexDeviationMM) : "—")
+                measurementTile("Стабильные вершины", repeatability.scanCount >= 2 ? String(format: "%.0f%%", repeatability.stableVertexPercent) : "—")
+                measurementTile("Разброс балла", repeatability.scanCount >= 2 ? String(format: "%.2f", repeatability.scoreSpread) : "—")
+                measurementTile("Сканы", repeatability.scanScores.map { String(format: "%.2f", $0) }.joined(separator: " · ").nilIfEmpty ?? "—")
+            }
+
+            if repeatability.scanCount >= 2 {
+                HStack(spacing: 8) {
+                    heatLegend(color: .green, text: "≤ 1.0 мм")
+                    heatLegend(color: .yellow, text: "1–2 мм")
+                    heatLegend(color: .red, text: "> 2 мм")
+                }
+            }
+        }
+        .padding(16)
+        .background(repeatabilityColor.opacity(0.065), in: RoundedRectangle(cornerRadius: 22))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22)
+                .stroke(repeatabilityColor.opacity(0.24), lineWidth: 1)
+        }
+    }
+
     private var meshCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -143,15 +206,16 @@ struct ResultsView: View {
                     .foregroundStyle(.white.opacity(0.48))
             }
 
-            if summary.depthFusion.applied {
-                Picker("Сетка", selection: $showBaseMesh) {
-                    Text("Depth Fusion").tag(false)
-                    Text("ARKit base").tag(true)
+            Picker("Сетка", selection: $meshMode) {
+                Text("Depth Fusion").tag(MeshDisplayMode.fused)
+                Text("ARKit base").tag(MeshDisplayMode.base)
+                if summary.repeatability.scanCount >= 2 {
+                    Text("Погрешность").tag(MeshDisplayMode.uncertainty)
                 }
-                .pickerStyle(.segmented)
             }
+            .pickerStyle(.segmented)
 
-            MeshPreviewView(document: document, useBaseMesh: showBaseMesh)
+            MeshPreviewView(document: document, mode: meshMode)
                 .frame(height: 320)
                 .background(
                     LinearGradient(
@@ -166,7 +230,7 @@ struct ResultsView: View {
             HStack {
                 meshStat("Вершины", "\(document.vertexCount)")
                 meshStat("Уточнено", "\(summary.depthFusion.refinedVertexCount)")
-                meshStat("Покрытие", String(format: "%.0f%%", summary.depthFusion.coveragePercent))
+                meshStat("Depth", String(format: "%.0f%%", summary.depthFusion.coveragePercent))
             }
         }
         .padding(16)
@@ -209,24 +273,6 @@ struct ResultsView: View {
                 measurementTile("Шум времени", String(format: "%.1f мм", summary.depthFusion.temporalNoiseMM))
                 measurementTile("Blend", String(format: "%.0f%%", summary.depthFusion.meanBlendWeight * 100))
                 measurementTile("Mapping", summary.depthFusion.mapping == "mirrored" ? "Mirrored" : "Native")
-            }
-
-            HStack(spacing: 10) {
-                depthFlag(
-                    "HQ",
-                    value: summary.depthFusion.highQualityFrameCount,
-                    total: summary.depthFusion.sourceFrameCount
-                )
-                depthFlag(
-                    "ABS",
-                    value: summary.depthFusion.absoluteAccuracyFrameCount,
-                    total: summary.depthFusion.sourceFrameCount
-                )
-                depthFlag(
-                    "FILTERED",
-                    value: summary.depthFusion.filteredFrameCount,
-                    total: summary.depthFusion.sourceFrameCount
-                )
             }
         }
         .padding(16)
@@ -271,7 +317,7 @@ struct ResultsView: View {
                 measurementTile("Высота", String(format: "%.1f мм", summary.heightMM))
                 measurementTile("Глубина", String(format: "%.1f мм", summary.depthMM))
                 measurementTile("3D-асимметрия", String(format: "%.2f мм", summary.symmetryErrorMM))
-                measurementTile("Стабильность", String(format: "%.2f мм", summary.stabilityErrorMM))
+                measurementTile("Внутри скана", String(format: "%.2f мм", summary.stabilityErrorMM))
                 measurementTile("Поворот", String(format: "%.1f°", summary.yawCoverageDegrees))
             }
         }
@@ -323,19 +369,32 @@ struct ResultsView: View {
 
     private var actionSection: some View {
         VStack(spacing: 10) {
-            Button {
-                showingShareSheet = true
-            } label: {
-                Label("Сохранить полный JSON", systemImage: "square.and.arrow.up")
+            if summary.repeatability.scanCount < summary.repeatability.requiredScanCount {
+                Button {
+                    scanner.continueReliabilitySeries()
+                } label: {
+                    Label(
+                        "Контрольный скан \(summary.repeatability.scanCount + 1) из \(summary.repeatability.requiredScanCount)",
+                        systemImage: "viewfinder.circle"
+                    )
                     .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(ResultPrimaryButtonStyle(accent: accent))
+            } else {
+                Button {
+                    shareAllExports()
+                } label: {
+                    Label("Экспорт JSON + OBJ + PLY", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(ResultPrimaryButtonStyle(accent: accent))
+                .disabled(scanner.exportURLs.isEmpty)
             }
-            .buttonStyle(ResultPrimaryButtonStyle(accent: accent))
-            .disabled(scanner.exportURL == nil)
 
             Button {
                 scanner.resetForNewScan()
             } label: {
-                Label("Новый скан", systemImage: "arrow.clockwise")
+                Label("Новая серия из трёх сканов", systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(ResultSecondaryButtonStyle())
@@ -433,24 +492,29 @@ struct ResultsView: View {
                 .foregroundStyle(.white.opacity(0.48))
             Text(value)
                 .font(.headline.monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private func depthFlag(_ title: String, value: Int, total: Int) -> some View {
-        VStack(spacing: 3) {
-            Text(title)
-                .font(.caption2.bold())
-                .foregroundStyle(accent)
-            Text("\(value)/\(max(total, 1))")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.white.opacity(0.62))
+    private func heatLegend(color: Color, text: String) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(text)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.58))
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 9)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func shareAllExports() {
+        shareItems = scanner.exportURLs.map { $0 as Any }
+        showingShareSheet = !shareItems.isEmpty
     }
 
     private var depthFusionDescription: String {
@@ -462,22 +526,32 @@ struct ResultsView: View {
     }
 
     private var categoryDescription: String {
-        switch summary.category {
-        case "SUB 3":
-            return "Нижний диапазон экспериментальной шкалы. Сначала проверь качество и повторяемость скана."
-        case "SUB 5":
-            return "Ниже среднего диапазона текущей экспериментальной калибровки."
-        case "LTN":
-            return "Нижняя часть среднего диапазона текущей экспериментальной калибровки."
-        case "MTN":
-            return "Средняя зона текущей экспериментальной калибровки."
-        case "HTN":
-            return "Верхняя часть среднего диапазона текущей экспериментальной калибровки."
-        case "CHAD":
-            return "Верхний диапазон демонстрационной шкалы. Требуется высокая повторяемость нескольких сканов."
-        default:
-            return "Результат требует повторного сканирования."
+        if !summary.categoryIsFinal {
+            if summary.repeatability.complete {
+                return "Категория скрыта: три скана расходятся сильнее допуска. Посмотри карту погрешности и повтори серию."
+            }
+            return "Категория пока не финальная. Выполни три последовательных скана, чтобы приложение проверило повторяемость формы."
         }
+
+        switch summary.category {
+        case "SUB 3": return "Нижний диапазон экспериментальной шкалы после проверки повторяемости."
+        case "SUB 5": return "Ниже среднего диапазона текущей экспериментальной калибровки."
+        case "LTN": return "Нижняя часть среднего диапазона текущей экспериментальной калибровки."
+        case "MTN": return "Средняя зона текущей экспериментальной калибровки."
+        case "HTN": return "Верхняя часть среднего диапазона текущей экспериментальной калибровки."
+        case "CHAD": return "Верхний диапазон демонстрационной шкалы, подтверждённый серией сканов."
+        default: return "Результат требует повторного сканирования."
+        }
+    }
+
+    private var repeatabilityColor: Color {
+        if summary.repeatability.passed { return accent }
+        if summary.repeatability.complete { return .orange }
+        return .yellow
+    }
+
+    private var categoryColor: Color {
+        summary.categoryIsFinal ? accent : Color.yellow
     }
 
     private var reliabilityColor: Color {
@@ -507,6 +581,12 @@ struct ResultsView: View {
     private var cardBorder: some View {
         RoundedRectangle(cornerRadius: 22)
             .stroke(.white.opacity(0.10), lineWidth: 1)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

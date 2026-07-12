@@ -1,6 +1,6 @@
 import Foundation
 
-struct ScanVector: Codable {
+struct ScanVector: Codable, Hashable {
     let x: Float
     let y: Float
     let z: Float
@@ -47,13 +47,60 @@ struct DepthFusionMetrics: Codable, Hashable {
     }
 }
 
-struct ScanMetrics: Codable {
+struct RepeatabilityMetrics: Codable, Hashable {
+    let scanCount: Int
+    let requiredScanCount: Int
+    let complete: Bool
+    let passed: Bool
+    let score: Int
+    let medianVertexDeviationMM: Float
+    let p90VertexDeviationMM: Float
+    let stableVertexPercent: Float
+    let scoreSpread: Float
+    let scanScores: [Float]
+    let scanQualities: [Int]
+    let vertexDeviationMM: [Float]
+    let status: String
+
+    static func pending(
+        scanCount: Int,
+        requiredScanCount: Int,
+        vertexCount: Int
+    ) -> RepeatabilityMetrics {
+        let remaining = max(requiredScanCount - scanCount, 0)
+        let status: String
+        if remaining > 0 {
+            status = "Нужно ещё контрольных сканов: \(remaining)."
+        } else {
+            status = "Ожидается расчёт повторяемости."
+        }
+
+        return RepeatabilityMetrics(
+            scanCount: scanCount,
+            requiredScanCount: requiredScanCount,
+            complete: scanCount >= requiredScanCount,
+            passed: false,
+            score: 0,
+            medianVertexDeviationMM: 0,
+            p90VertexDeviationMM: 0,
+            stableVertexPercent: 0,
+            scoreSpread: 0,
+            scanScores: [],
+            scanQualities: [],
+            vertexDeviationMM: Array(repeating: 0, count: vertexCount),
+            status: status
+        )
+    }
+}
+
+struct ScanMetrics: Codable, Hashable {
     let scanQuality: Int
     let reliability: String
     let overallPSLScore: Float
     let scoreRangeLow: Float
     let scoreRangeHigh: Float
     let category: String
+    let categoryIsFinal: Bool
     let symmetryErrorMM: Float
     let stabilityErrorMM: Float
     let widthMM: Float
@@ -66,11 +113,12 @@ struct ScanMetrics: Codable {
     let rejectedFrames: Int
     let depthFrames: Int
     let depthFusion: DepthFusionMetrics
+    let repeatability: RepeatabilityMetrics
     let featureMetrics: [FeatureMetric]
     let warnings: [String]
 }
 
-struct FaceScanDocument: Codable {
+struct FaceScanDocument: Codable, Hashable {
     let format: String
     let version: Int
     let createdAt: Date
@@ -94,6 +142,7 @@ struct ScanSummary {
     let scoreRangeLow: Float
     let scoreRangeHigh: Float
     let category: String
+    let categoryIsFinal: Bool
     let symmetryErrorMM: Float
     let stabilityErrorMM: Float
     let widthMM: Float
@@ -102,6 +151,7 @@ struct ScanSummary {
     let yawCoverageDegrees: Float
     let acceptedFrames: Int
     let depthFusion: DepthFusionMetrics
+    let repeatability: RepeatabilityMetrics
     let featureMetrics: [FeatureMetric]
     let warnings: [String]
 }
