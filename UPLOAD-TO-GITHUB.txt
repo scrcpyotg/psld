@@ -1,15 +1,20 @@
-ОБНОВЛЕНИЕ PSL SCANNER ДО V0.2
+PSL Scanner v0.3 — обновление через GitHub
 
-1. Распакуйте архив.
-2. Откройте репозиторий scrcpyotg/psld.
-3. Add file -> Upload files.
-4. Перетащите ВСЁ содержимое распакованной папки.
-5. Разрешите замену существующих файлов и нажмите Commit changes.
-6. Откройте Actions и дождитесь Build unsigned IPA.
-7. Скачайте артефакт PSLScanner-unsigned.
+1. Распакуйте архив psl-scanner-ios-v0.3-update.zip.
+2. В репозитории откройте Code → Add file → Upload files.
+3. Перетащите всё содержимое распакованной папки.
+4. Разрешите замену существующих файлов.
+5. Нажмите Commit changes.
+6. GitHub Actions автоматически соберёт новую unsigned IPA.
 
-Проверьте, что загрузились новые файлы:
+Изменённые файлы:
+- PSLScanner/Scanner/DepthFusion.swift
+- PSLScanner/Scanner/FaceScanner.swift
+- PSLScanner/Models/ScanDocument.swift
+- PSLScanner/UI/ContentView.swift
 - PSLScanner/UI/ResultsView.swift
 - PSLScanner/UI/MeshPreviewView.swift
-- PSLScanner/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
-- scripts/generate_icon.py
+- project.yml
+- README-RU.md
+
+Workflow build-ipa.yml менять не нужно.

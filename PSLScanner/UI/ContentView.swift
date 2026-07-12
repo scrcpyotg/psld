@@ -70,7 +70,7 @@ private struct ScannerCaptureView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("PSL SCANNER")
                     .font(.system(size: 18, weight: .black, design: .rounded))
-                Text("TrueDepth 3D · обработка на устройстве")
+                Text("TrueDepth Depth Fusion · обработка на устройстве")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
             }
@@ -149,9 +149,11 @@ private struct ScannerCaptureView: View {
                         .tint(accent)
 
                     HStack {
-                        Text("Принято: \(scanner.acceptedFrames)")
+                        Text("Mesh: \(scanner.acceptedFrames)")
                         Spacer()
-                        Text("Отклонено: \(scanner.rejectedFrames)")
+                        Text("Depth: \(scanner.capturedDepthFrames)")
+                        Spacer()
+                        Text("Reject: \(scanner.rejectedFrames)")
                     }
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.68))

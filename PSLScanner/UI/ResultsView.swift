@@ -6,6 +6,7 @@ struct ResultsView: View {
     let document: FaceScanDocument
 
     @State private var showingShareSheet = false
+    @State private var showBaseMesh = false
     private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
 
     var body: some View {
@@ -17,6 +18,7 @@ struct ResultsView: View {
                     topBar
                     scoreHero
                     meshCard
+                    depthFusionSection
                     componentSection
                     measurementsSection
 
@@ -59,7 +61,7 @@ struct ResultsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("RESULTS")
                     .font(.system(size: 20, weight: .black, design: .rounded))
-                Text("TrueDepth surface analysis")
+                Text("TrueDepth depth-fused surface analysis")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -141,7 +143,15 @@ struct ResultsView: View {
                     .foregroundStyle(.white.opacity(0.48))
             }
 
-            MeshPreviewView(document: document)
+            if summary.depthFusion.applied {
+                Picker("Сетка", selection: $showBaseMesh) {
+                    Text("Depth Fusion").tag(false)
+                    Text("ARKit base").tag(true)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            MeshPreviewView(document: document, useBaseMesh: showBaseMesh)
                 .frame(height: 320)
                 .background(
                     LinearGradient(
@@ -155,13 +165,82 @@ struct ResultsView: View {
 
             HStack {
                 meshStat("Вершины", "\(document.vertexCount)")
-                meshStat("Треугольники", "\(document.triangleCount)")
-                meshStat("Стабильность", String(format: "%.2f мм", summary.stabilityErrorMM))
+                meshStat("Уточнено", "\(summary.depthFusion.refinedVertexCount)")
+                meshStat("Покрытие", String(format: "%.0f%%", summary.depthFusion.coveragePercent))
             }
         }
         .padding(16)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
         .overlay(cardBorder)
+    }
+
+    private var depthFusionSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                sectionTitle("Depth Fusion", icon: "dot.radiowaves.left.and.right")
+                Spacer()
+
+                Text(summary.depthFusion.applied ? "ACTIVE" : "FALLBACK")
+                    .font(.caption2.bold())
+                    .foregroundStyle(summary.depthFusion.applied ? Color.black : Color.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        summary.depthFusion.applied ? accent : Color.orange.opacity(0.14),
+                        in: Capsule()
+                    )
+            }
+
+            Text(depthFusionDescription)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.66))
+                .fixedSize(horizontal: false, vertical: true)
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ],
+                spacing: 10
+            ) {
+                measurementTile("Кадры depth", "\(summary.depthFusion.sourceFrameCount)")
+                measurementTile("Уточнено", "\(summary.depthFusion.refinedVertexCount)/\(summary.depthFusion.totalVertexCount)")
+                measurementTile("Остаток", String(format: "%.1f мм", summary.depthFusion.medianResidualMM))
+                measurementTile("Шум времени", String(format: "%.1f мм", summary.depthFusion.temporalNoiseMM))
+                measurementTile("Blend", String(format: "%.0f%%", summary.depthFusion.meanBlendWeight * 100))
+                measurementTile("Mapping", summary.depthFusion.mapping == "mirrored" ? "Mirrored" : "Native")
+            }
+
+            HStack(spacing: 10) {
+                depthFlag(
+                    "HQ",
+                    value: summary.depthFusion.highQualityFrameCount,
+                    total: summary.depthFusion.sourceFrameCount
+                )
+                depthFlag(
+                    "ABS",
+                    value: summary.depthFusion.absoluteAccuracyFrameCount,
+                    total: summary.depthFusion.sourceFrameCount
+                )
+                depthFlag(
+                    "FILTERED",
+                    value: summary.depthFusion.filteredFrameCount,
+                    total: summary.depthFusion.sourceFrameCount
+                )
+            }
+        }
+        .padding(16)
+        .background(
+            (summary.depthFusion.applied ? accent : Color.orange).opacity(0.065),
+            in: RoundedRectangle(cornerRadius: 22)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 22)
+                .stroke(
+                    (summary.depthFusion.applied ? accent : Color.orange).opacity(0.24),
+                    lineWidth: 1
+                )
+        }
     }
 
     private var componentSection: some View {
@@ -358,6 +437,28 @@ struct ResultsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func depthFlag(_ title: String, value: Int, total: Int) -> some View {
+        VStack(spacing: 3) {
+            Text(title)
+                .font(.caption2.bold())
+                .foregroundStyle(accent)
+            Text("\(value)/\(max(total, 1))")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.62))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var depthFusionDescription: String {
+        if summary.depthFusion.applied {
+            return "Итоговая сетка уточнена временной медианой нескольких синхронных карт глубины. Выбросы отбрасываются, а максимальная коррекция каждой вершины ограничена."
+        }
+
+        return "Карты глубины были получены, но не прошли контроль покрытия, остатка или временной стабильности. Для результата используется безопасная медианная ARKit-сетка."
     }
 
     private var categoryDescription: String {

@@ -21,6 +21,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var progress: Double = 0
     @Published private(set) var acceptedFrames = 0
     @Published private(set) var rejectedFrames = 0
+    @Published private(set) var capturedDepthFrames = 0
     @Published private(set) var trueDepthDetected = false
     @Published private(set) var summary: ScanSummary?
     @Published private(set) var resultDocument: FaceScanDocument?
@@ -32,11 +33,13 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
     private var collecting = false
     private var samples: [[SIMD3<Float>]] = []
+    private var depthSamples: [DepthRefinedFrame] = []
     private var triangleIndices: [Int] = []
     private var lastAcceptedTimestamp: TimeInterval = 0
     private var yawMinimum: Float = .greatestFiniteMagnitude
     private var yawMaximum: Float = -.greatestFiniteMagnitude
     private var depthFrames = 0
+    private var rawDepthFrames = 0
     private var totalObservedFrames = 0
 
     // UI/lifecycle watchdog. These values are read and changed on the main queue.
@@ -150,6 +153,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             self.progress = 0
             self.acceptedFrames = 0
             self.rejectedFrames = 0
+            self.capturedDepthFrames = 0
             self.trueDepthDetected = false
             self.summary = nil
             self.resultDocument = nil
@@ -157,11 +161,13 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
             self.sessionQueue.async {
                 self.samples.removeAll(keepingCapacity: true)
+                self.depthSamples.removeAll(keepingCapacity: true)
                 self.triangleIndices.removeAll(keepingCapacity: true)
                 self.lastAcceptedTimestamp = 0
                 self.yawMinimum = .greatestFiniteMagnitude
                 self.yawMaximum = -.greatestFiniteMagnitude
                 self.depthFrames = 0
+                self.rawDepthFrames = 0
                 self.totalObservedFrames = 0
                 self.collecting = true
             }
@@ -201,6 +207,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             self.progress = 0
             self.acceptedFrames = 0
             self.rejectedFrames = 0
+            self.capturedDepthFrames = 0
             self.trueDepthDetected = false
             self.summary = nil
             self.resultDocument = nil
@@ -283,7 +290,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         totalObservedFrames += 1
 
         if frame.capturedDepthData != nil {
-            depthFrames += 1
+            rawDepthFrames += 1
             if !trueDepthDetected {
                 publish {
                     self.trueDepthDetected = true
@@ -344,6 +351,22 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
         if triangleIndices.isEmpty {
             triangleIndices = face.geometry.triangleIndices.map(Int.init)
+        }
+
+        // Dense depth refinement is intentionally sampled on every second
+        // accepted geometry frame to keep the live TrueDepth session responsive.
+        if samples.count.isMultiple(of: 2),
+           let depthSample = DepthFusionEngine.capture(
+                frame: frame,
+                face: face,
+                arkitVertices: vertices
+           ) {
+            depthSamples.append(depthSample)
+            depthFrames = depthSamples.count
+            let currentDepthFrames = depthFrames
+            publish {
+                self.capturedDepthFrames = currentDepthFrames
+            }
         }
 
         samples.append(vertices)
@@ -409,8 +432,10 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         collecting = false
 
         let capturedSamples = samples
+        let capturedDepthSamples = depthSamples
         let capturedTriangles = triangleIndices
         let capturedDepthFrames = depthFrames
+        let capturedRawDepthFrames = rawDepthFrames
         let capturedRejected = rejectedFrames
         let capturedYawMin = yawMinimum
         let capturedYawMax = yawMaximum
@@ -419,12 +444,12 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         publish {
             self.scanAttemptID = nil
             self.state = .processing
-            self.statusText = "Усредняем 3D-сетку и считаем поверхностные прокси…"
+            self.statusText = "Объединяем ARKit mesh с несколькими картами глубины…"
             self.progress = 1
         }
 
         analysisQueue.async {
-            guard capturedDepthFrames > 0 else {
+            guard capturedRawDepthFrames > 0 else {
                 self.publish {
                     self.state = .failed("ARKit не выдал карту глубины. Нужен iPhone с активной фронтальной TrueDepth-камерой.")
                     self.statusText = "TrueDepth не обнаружен."
@@ -435,6 +460,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             do {
                 let result = try self.makeDocument(
                     samples: capturedSamples,
+                    depthSamples: capturedDepthSamples,
                     triangles: capturedTriangles,
                     depthFrames: capturedDepthFrames,
                     rejectedFrames: capturedRejected,
@@ -450,7 +476,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                let fileName = "PSL-TrueDepth-v2-\(formatter.string(from: Date())).json"
+                let fileName = "PSL-TrueDepth-v3-\(formatter.string(from: Date())).json"
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
                 try data.write(to: url, options: .atomic)
 
@@ -472,6 +498,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
     private func makeDocument(
         samples: [[SIMD3<Float>]],
+        depthSamples: [DepthRefinedFrame],
         triangles: [Int],
         depthFrames: Int,
         rejectedFrames: Int,
@@ -515,13 +542,20 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             )
         }
 
+        let fusion = DepthFusionEngine.fuse(
+            baseMesh: medianMesh,
+            frames: depthSamples,
+            triangleIndices: triangles
+        )
+        let analysisMesh = fusion.metrics.applied ? fusion.mesh : medianMesh
+
         guard
-            let minX = medianMesh.map(\.x).min(),
-            let maxX = medianMesh.map(\.x).max(),
-            let minY = medianMesh.map(\.y).min(),
-            let maxY = medianMesh.map(\.y).max(),
-            let minZ = medianMesh.map(\.z).min(),
-            let maxZ = medianMesh.map(\.z).max()
+            let minX = analysisMesh.map(\.x).min(),
+            let maxX = analysisMesh.map(\.x).max(),
+            let minY = analysisMesh.map(\.y).min(),
+            let maxY = analysisMesh.map(\.y).max(),
+            let minZ = analysisMesh.map(\.z).min(),
+            let maxZ = analysisMesh.map(\.z).max()
         else {
             throw ScannerError.notEnoughData
         }
@@ -529,26 +563,37 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         let widthMM = (maxX - minX) * 1000
         let heightMM = (maxY - minY) * 1000
         let depthMM = (maxZ - minZ) * 1000
-        let symmetryErrorMM = mirroredNearestNeighborError(mesh: medianMesh) * 1000
+        let symmetryErrorMM = mirroredNearestNeighborError(mesh: analysisMesh) * 1000
         let stabilityErrorMM = meshStabilityError(samples: samples, medianMesh: medianMesh) * 1000
         let yawCoverageDegrees = max(0, yawMax - yawMin) * 180 / .pi
 
         let frameScore = min(1, Float(samples.count) / Float(targetFrameCount))
         let coverageScore = min(1, yawCoverageDegrees / 28)
-        let depthScore = min(1, Float(depthFrames) / Float(max(observedFrames, 1)))
+        let depthScore = min(1, Float(depthFrames) / Float(max(samples.count / 2, 1)))
         let acceptanceScore = Float(samples.count) / Float(max(samples.count + rejectedFrames, 1))
         let stabilityScore = clamp(1 - stabilityErrorMM / 2.2, lower: 0, upper: 1)
+        let fusionScore: Float
+
+        if fusion.metrics.applied {
+            let coverage = clamp(fusion.metrics.coveragePercent / 55, lower: 0, upper: 1)
+            let residual = clamp(1 - fusion.metrics.medianResidualMM / 25, lower: 0, upper: 1)
+            let temporal = clamp(1 - fusion.metrics.temporalNoiseMM / 8, lower: 0, upper: 1)
+            fusionScore = coverage * 0.45 + residual * 0.30 + temporal * 0.25
+        } else {
+            fusionScore = 0.18
+        }
 
         let qualityFloat =
-            frameScore * 20 +
-            coverageScore * 20 +
-            depthScore * 20 +
+            frameScore * 18 +
+            coverageScore * 17 +
+            depthScore * 15 +
             acceptanceScore * 15 +
-            stabilityScore * 25
+            stabilityScore * 20 +
+            fusionScore * 15
 
         let quality = Int(clamp(qualityFloat.rounded(), lower: 0, upper: 100))
         let analysis = analyzeSurface(
-            mesh: medianMesh,
+            mesh: analysisMesh,
             widthMM: widthMM,
             heightMM: heightMM,
             depthMM: depthMM,
@@ -557,7 +602,8 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             quality: quality,
             yawCoverageDegrees: yawCoverageDegrees,
             acceptedFrames: samples.count,
-            rejectedFrames: rejectedFrames
+            rejectedFrames: rejectedFrames,
+            depthFusion: fusion.metrics
         )
 
         let metrics = ScanMetrics(
@@ -578,17 +624,21 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             acceptedFrames: samples.count,
             rejectedFrames: rejectedFrames,
             depthFrames: depthFrames,
+            depthFusion: fusion.metrics,
             featureMetrics: analysis.features,
             warnings: analysis.warnings
         )
 
-        let vectors = medianMesh.map {
+        let vectors = analysisMesh.map {
+            ScanVector(x: $0.x, y: $0.y, z: $0.z)
+        }
+        let arkitVectors = medianMesh.map {
             ScanVector(x: $0.x, y: $0.y, z: $0.z)
         }
 
         let document = FaceScanDocument(
-            format: "psl-truedepth-mesh",
-            version: 2,
+            format: "psl-truedepth-depth-fused-mesh",
+            version: 3,
             createdAt: Date(),
             deviceModel: deviceModel(),
             operatingSystem: UIDevice.current.systemVersion,
@@ -598,8 +648,9 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             triangleCount: triangles.count / 3,
             metrics: metrics,
             vertices: vectors,
+            arkitVertices: arkitVectors,
             triangleIndices: triangles,
-            notice: "Экспериментальный анализ наружной поверхности лица TrueDepth. Он не показывает внутренние кости, не является медицинским исследованием и не измеряет объективную привлекательность."
+            notice: "Экспериментальный анализ наружной поверхности лица. В режиме Depth Fusion ARKit-сетка корректируется несколькими синхронными картами TrueDepth с ограничением выбросов и временной медианой. Это не показывает внутренние кости, не является медицинским исследованием и не измеряет объективную привлекательность."
         )
 
         let summary = ScanSummary(
@@ -616,6 +667,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             depthMM: depthMM,
             yawCoverageDegrees: yawCoverageDegrees,
             acceptedFrames: samples.count,
+            depthFusion: fusion.metrics,
             featureMetrics: analysis.features,
             warnings: analysis.warnings
         )
@@ -633,7 +685,8 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         quality: Int,
         yawCoverageDegrees: Float,
         acceptedFrames: Int,
-        rejectedFrames: Int
+        rejectedFrames: Int,
+        depthFusion: DepthFusionMetrics
     ) -> SurfaceAnalysis {
         guard
             let minX = mesh.map(\.x).min(),
@@ -806,22 +859,40 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         )
 
         let rejectionRatio = Float(rejectedFrames) / Float(max(acceptedFrames + rejectedFrames, 1))
+        let depthUncertainty: Float
+        if depthFusion.applied {
+            depthUncertainty =
+                max(0, 42 - depthFusion.coveragePercent) * 0.004 +
+                max(0, depthFusion.medianResidualMM - 8) * 0.010 +
+                max(0, depthFusion.temporalNoiseMM - 2.5) * 0.018
+        } else {
+            depthUncertainty = 0.24
+        }
+
         let uncertainty = clamp(
-            0.22 +
-            Float(100 - quality) * 0.010 +
+            0.20 +
+            Float(100 - quality) * 0.009 +
             max(0, 24 - yawCoverageDegrees) * 0.012 +
             rejectionRatio * 0.30 +
-            max(0, stabilityErrorMM - 0.7) * 0.08,
-            lower: 0.22,
-            upper: 1.30
+            max(0, stabilityErrorMM - 0.7) * 0.08 +
+            depthUncertainty,
+            lower: 0.20,
+            upper: 1.45
         )
 
         let low = clamp(pslScore - uncertainty, lower: 1, upper: 10)
         let high = clamp(pslScore + uncertainty, lower: 1, upper: 10)
         let reliability: String
-        if quality >= 86 && stabilityErrorMM <= 0.85 && yawCoverageDegrees >= 25 {
+        if quality >= 86 &&
+            stabilityErrorMM <= 0.85 &&
+            yawCoverageDegrees >= 25 &&
+            depthFusion.applied &&
+            depthFusion.coveragePercent >= 35 &&
+            depthFusion.medianResidualMM <= 16 {
             reliability = "Высокая"
-        } else if quality >= 70 && stabilityErrorMM <= 1.35 && yawCoverageDegrees >= 18 {
+        } else if quality >= 68 &&
+                    stabilityErrorMM <= 1.45 &&
+                    yawCoverageDegrees >= 18 {
             reliability = "Средняя"
         } else {
             reliability = "Низкая"
@@ -839,6 +910,19 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         }
         if rejectionRatio > 0.32 {
             warnings.append("Много кадров отклонено из-за движения, моргания или выражения лица.")
+        }
+        if !depthFusion.applied {
+            warnings.append("Depth Fusion не прошёл контроль покрытия или согласованности. Балл рассчитан по медианной ARKit-сетке, а диапазон расширен.")
+        } else {
+            if depthFusion.coveragePercent < 35 {
+                warnings.append("Карта глубины уточнила только часть вершин. Попробуй более ровный свет и медленнее поверни голову.")
+            }
+            if depthFusion.medianResidualMM > 16 {
+                warnings.append("ARKit mesh и плотная карта глубины расходились сильнее желаемого; влияние Depth Fusion автоматически ограничено.")
+            }
+            if depthFusion.temporalNoiseMM > 5 {
+                warnings.append("Глубина менялась между кадрами. Держи расстояние и выражение лица стабильнее.")
+            }
         }
         warnings.append("Zygomatic, maxilla и mandible представлены только наружными 3D-прокси поверхности, а не измерением костей.")
 

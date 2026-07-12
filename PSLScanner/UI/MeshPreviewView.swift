@@ -4,6 +4,11 @@ import UIKit
 
 struct MeshPreviewView: UIViewRepresentable {
     let document: FaceScanDocument
+    let useBaseMesh: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(useBaseMesh: useBaseMesh)
+    }
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
@@ -15,11 +20,18 @@ struct MeshPreviewView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {}
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        guard context.coordinator.useBaseMesh != useBaseMesh else { return }
+        context.coordinator.useBaseMesh = useBaseMesh
+        uiView.scene = makeScene()
+    }
 
     private func makeScene() -> SCNScene {
         let scene = SCNScene()
-        let vertices = document.vertices.map {
+        let selectedVertices = useBaseMesh && !document.arkitVertices.isEmpty
+            ? document.arkitVertices
+            : document.vertices
+        let vertices = selectedVertices.map {
             SCNVector3($0.x, $0.y, $0.z)
         }
 
@@ -54,8 +66,13 @@ struct MeshPreviewView: UIViewRepresentable {
 
         let geometry = SCNGeometry(sources: [source], elements: [element])
         let wireMaterial = SCNMaterial()
-        wireMaterial.diffuse.contents = UIColor(red: 0.52, green: 1.0, blue: 0.25, alpha: 0.90)
-        wireMaterial.emission.contents = UIColor(red: 0.20, green: 0.70, blue: 0.08, alpha: 0.45)
+        let fusionActive = document.metrics.depthFusion.applied && !useBaseMesh
+        wireMaterial.diffuse.contents = fusionActive
+            ? UIColor(red: 0.52, green: 1.0, blue: 0.25, alpha: 0.94)
+            : UIColor(red: 0.45, green: 0.72, blue: 1.0, alpha: 0.90)
+        wireMaterial.emission.contents = fusionActive
+            ? UIColor(red: 0.20, green: 0.70, blue: 0.08, alpha: 0.45)
+            : UIColor(red: 0.10, green: 0.32, blue: 0.75, alpha: 0.40)
         wireMaterial.fillMode = .lines
         wireMaterial.isDoubleSided = true
         wireMaterial.lightingModel = .constant
@@ -88,12 +105,22 @@ struct MeshPreviewView: UIViewRepresentable {
         let key = SCNLight()
         key.type = .omni
         key.intensity = 700
-        key.color = UIColor(red: 0.55, green: 1.0, blue: 0.30, alpha: 1)
+        key.color = fusionActive
+            ? UIColor(red: 0.55, green: 1.0, blue: 0.30, alpha: 1)
+            : UIColor(red: 0.40, green: 0.65, blue: 1.0, alpha: 1)
         let keyNode = SCNNode()
         keyNode.light = key
         keyNode.position = SCNVector3(0.16, 0.18, 0.24)
         scene.rootNode.addChildNode(keyNode)
 
         return scene
+    }
+
+    final class Coordinator {
+        var useBaseMesh: Bool
+
+        init(useBaseMesh: Bool) {
+            self.useBaseMesh = useBaseMesh
+        }
     }
 }
