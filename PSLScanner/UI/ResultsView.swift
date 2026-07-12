@@ -1,13 +1,35 @@
 import SwiftUI
 
+private enum ResultSection: String, CaseIterable, Identifiable {
+    case overview
+    case metrics
+    case symmetry
+    case mesh
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: return "Итог"
+        case .metrics: return "3D-метрики"
+        case .symmetry: return "Симметрия"
+        case .mesh: return "Mesh"
+        }
+    }
+}
+
 struct ResultsView: View {
     @EnvironmentObject private var scanner: FaceScanner
+    @EnvironmentObject private var historyStore: ScanHistoryStore
+
     let summary: ScanSummary
     let document: FaceScanDocument
 
+    @State private var selectedSection: ResultSection = .overview
     @State private var showingShareSheet = false
     @State private var shareItems = [Any]()
     @State private var meshMode: MeshDisplayMode = .fused
+
     private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
 
     var body: some View {
@@ -15,20 +37,22 @@ struct ResultsView: View {
             background
 
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     topBar
                     scoreHero
-                    repeatabilitySection
-                    meshCard
-                    depthFusionSection
-                    componentSection
-                    measurementsSection
+                    sectionPicker
 
-                    if !summary.warnings.isEmpty {
-                        warningsSection
+                    switch selectedSection {
+                    case .overview:
+                        overviewSection
+                    case .metrics:
+                        metricsSection
+                    case .symmetry:
+                        symmetrySection
+                    case .mesh:
+                        meshSection
                     }
 
-                    noticeSection
                     actionSection
                 }
                 .padding(.horizontal, 16)
@@ -40,12 +64,14 @@ struct ResultsView: View {
         .sheet(isPresented: $showingShareSheet) {
             ShareSheet(items: shareItems)
         }
+        .task {
+            historyStore.saveIfNeeded(document)
+        }
     }
 
     private var background: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-
             RadialGradient(
                 colors: [accent.opacity(0.12), .clear],
                 center: .topTrailing,
@@ -59,7 +85,7 @@ struct ResultsView: View {
     private var topBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text("RESULTS")
+                Text("RESULTS v0.5")
                     .font(.system(size: 20, weight: .black, design: .rounded))
                 Text("TrueDepth · серия \(summary.repeatability.scanCount)/\(summary.repeatability.requiredScanCount)")
                     .font(.caption)
@@ -90,7 +116,7 @@ struct ResultsView: View {
                         .foregroundStyle(accent)
 
                     Text(String(format: "%.2f", summary.pslScore))
-                        .font(.system(size: 64, weight: .black, design: .rounded))
+                        .font(.system(size: 62, weight: .black, design: .rounded))
                         .foregroundStyle(scoreGradient)
                         .minimumScaleFactor(0.7)
 
@@ -115,18 +141,17 @@ struct ResultsView: View {
                 }
             }
 
-            Divider()
-                .overlay(.white.opacity(0.12))
+            Divider().overlay(.white.opacity(0.12))
 
             Text(categoryDescription)
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.74))
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 heroStat("Качество", "\(summary.quality)/100")
-                heroStat("Кадры", "\(summary.acceptedFrames)")
-                heroStat("Покрытие", String(format: "%.0f°", summary.yawCoverageDegrees))
+                heroStat("Повторяемость", "\(summary.repeatability.score)%")
+                heroStat("Depth", summary.depthFusion.applied ? "ON" : "BASE")
             }
         }
         .padding(18)
@@ -134,14 +159,49 @@ struct ResultsView: View {
         .overlay(cardBorder)
     }
 
-    private var repeatabilitySection: some View {
+    private var sectionPicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(ResultSection.allCases) { section in
+                    Button(section.title) {
+                        withAnimation(.easeInOut(duration: 0.20)) {
+                            selectedSection = section
+                        }
+                    }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 9)
+                    .background(
+                        selectedSection == section ? accent : Color.white.opacity(0.07),
+                        in: Capsule()
+                    )
+                    .foregroundStyle(selectedSection == section ? Color.black : Color.white)
+                }
+            }
+        }
+    }
+
+    private var overviewSection: some View {
+        VStack(spacing: 16) {
+            repeatabilityCard
+            depthFusionCard
+            measurementsSnapshot
+
+            if !summary.warnings.isEmpty {
+                warningsCard
+            }
+
+            noticeCard
+        }
+    }
+
+    private var repeatabilityCard: some View {
         let repeatability = summary.repeatability
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack {
                 sectionTitle("Scan Reliability", icon: "checkmark.shield")
                 Spacer()
-
                 Text(repeatability.complete ? (repeatability.passed ? "PASSED" : "FAILED") : "\(repeatability.scanCount)/\(repeatability.requiredScanCount)")
                     .font(.caption2.bold())
                     .foregroundStyle(repeatability.passed ? Color.black : repeatabilityColor)
@@ -155,188 +215,200 @@ struct ResultsView: View {
 
             Text(repeatability.status)
                 .font(.footnote)
-                .foregroundStyle(.white.opacity(0.68))
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(.white.opacity(0.62))
 
-            ProgressView(
-                value: Double(repeatability.scanCount),
-                total: Double(max(repeatability.requiredScanCount, 1))
-            )
-            .tint(repeatability.passed ? accent : repeatabilityColor)
-
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
-                ],
-                spacing: 10
-            ) {
-                measurementTile("Повторяемость", repeatability.scanCount >= 2 ? "\(repeatability.score)/100" : "—")
-                measurementTile("Медиана", repeatability.scanCount >= 2 ? String(format: "%.2f мм", repeatability.medianVertexDeviationMM) : "—")
-                measurementTile("P90", repeatability.scanCount >= 2 ? String(format: "%.2f мм", repeatability.p90VertexDeviationMM) : "—")
-                measurementTile("Стабильные вершины", repeatability.scanCount >= 2 ? String(format: "%.0f%%", repeatability.stableVertexPercent) : "—")
-                measurementTile("Разброс балла", repeatability.scanCount >= 2 ? String(format: "%.2f", repeatability.scoreSpread) : "—")
-                measurementTile("Сканы", repeatability.scanScores.map { String(format: "%.2f", $0) }.joined(separator: " · ").nilIfEmpty ?? "—")
-            }
-
-            if repeatability.scanCount >= 2 {
-                HStack(spacing: 8) {
-                    heatLegend(color: .green, text: "≤ 1.0 мм")
-                    heatLegend(color: .yellow, text: "1–2 мм")
-                    heatLegend(color: .red, text: "> 2 мм")
-                }
+            HStack(spacing: 10) {
+                metricTile("Median", String(format: "%.2f мм", repeatability.medianVertexDeviationMM))
+                metricTile("P90", String(format: "%.2f мм", repeatability.p90VertexDeviationMM))
+                metricTile("Stable", String(format: "%.0f%%", repeatability.stableVertexPercent))
             }
         }
         .padding(16)
-        .background(repeatabilityColor.opacity(0.065), in: RoundedRectangle(cornerRadius: 22))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(repeatabilityColor.opacity(0.24), lineWidth: 1)
-        }
-    }
-
-    private var meshCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("3D MESH", systemImage: "cube.transparent")
-                    .font(.headline.bold())
-                Spacer()
-                Text("Вращай пальцем")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.48))
-            }
-
-            Picker("Сетка", selection: $meshMode) {
-                Text("Depth Fusion").tag(MeshDisplayMode.fused)
-                Text("ARKit base").tag(MeshDisplayMode.base)
-                if summary.repeatability.scanCount >= 2 {
-                    Text("Погрешность").tag(MeshDisplayMode.uncertainty)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            MeshPreviewView(document: document, mode: meshMode)
-                .frame(height: 320)
-                .background(
-                    LinearGradient(
-                        colors: [accent.opacity(0.08), .clear],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    in: RoundedRectangle(cornerRadius: 18)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-
-            HStack {
-                meshStat("Вершины", "\(document.vertexCount)")
-                meshStat("Уточнено", "\(summary.depthFusion.refinedVertexCount)")
-                meshStat("Depth", String(format: "%.0f%%", summary.depthFusion.coveragePercent))
-            }
-        }
-        .padding(16)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
         .overlay(cardBorder)
     }
 
-    private var depthFusionSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private var depthFusionCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
             HStack {
                 sectionTitle("Depth Fusion", icon: "dot.radiowaves.left.and.right")
                 Spacer()
-
                 Text(summary.depthFusion.applied ? "ACTIVE" : "FALLBACK")
                     .font(.caption2.bold())
                     .foregroundStyle(summary.depthFusion.applied ? Color.black : Color.orange)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(
-                        summary.depthFusion.applied ? accent : Color.orange.opacity(0.14),
-                        in: Capsule()
-                    )
+                    .background(summary.depthFusion.applied ? accent : Color.orange.opacity(0.13), in: Capsule())
             }
 
-            Text(depthFusionDescription)
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.66))
-                .fixedSize(horizontal: false, vertical: true)
-
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
-                ],
-                spacing: 10
-            ) {
-                measurementTile("Кадры depth", "\(summary.depthFusion.sourceFrameCount)")
-                measurementTile("Уточнено", "\(summary.depthFusion.refinedVertexCount)/\(summary.depthFusion.totalVertexCount)")
-                measurementTile("Остаток", String(format: "%.1f мм", summary.depthFusion.medianResidualMM))
-                measurementTile("Шум времени", String(format: "%.1f мм", summary.depthFusion.temporalNoiseMM))
-                measurementTile("Blend", String(format: "%.0f%%", summary.depthFusion.meanBlendWeight * 100))
-                measurementTile("Mapping", summary.depthFusion.mapping == "mirrored" ? "Mirrored" : "Native")
+            HStack(spacing: 10) {
+                metricTile("Coverage", String(format: "%.0f%%", summary.depthFusion.coveragePercent))
+                metricTile("Residual", String(format: "%.1f мм", summary.depthFusion.medianResidualMM))
+                metricTile("Noise", String(format: "%.1f мм", summary.depthFusion.temporalNoiseMM))
             }
         }
         .padding(16)
-        .background(
-            (summary.depthFusion.applied ? accent : Color.orange).opacity(0.065),
-            in: RoundedRectangle(cornerRadius: 22)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(
-                    (summary.depthFusion.applied ? accent : Color.orange).opacity(0.24),
-                    lineWidth: 1
-                )
-        }
-    }
-
-    private var componentSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Компоненты", icon: "chart.bar.xaxis")
-
-            ForEach(summary.featureMetrics) { metric in
-                componentRow(metric)
-            }
-        }
-        .padding(16)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
         .overlay(cardBorder)
     }
 
-    private var measurementsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Измерения сетки", icon: "ruler")
+    private var measurementsSnapshot: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            sectionTitle("Базовые размеры", icon: "ruler")
 
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
-                ],
-                spacing: 10
-            ) {
-                measurementTile("Ширина", String(format: "%.1f мм", summary.widthMM))
-                measurementTile("Высота", String(format: "%.1f мм", summary.heightMM))
-                measurementTile("Глубина", String(format: "%.1f мм", summary.depthMM))
-                measurementTile("3D-асимметрия", String(format: "%.2f мм", summary.symmetryErrorMM))
-                measurementTile("Внутри скана", String(format: "%.2f мм", summary.stabilityErrorMM))
-                measurementTile("Поворот", String(format: "%.1f°", summary.yawCoverageDegrees))
+            HStack(spacing: 10) {
+                metricTile("Ширина", String(format: "%.1f мм", summary.widthMM))
+                metricTile("Высота", String(format: "%.1f мм", summary.heightMM))
+                metricTile("Глубина", String(format: "%.1f мм", summary.depthMM))
             }
         }
         .padding(16)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
         .overlay(cardBorder)
     }
 
-    private var warningsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Что учесть", icon: "exclamationmark.triangle")
+    private var metricsSection: some View {
+        VStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle("Feature scores", icon: "chart.bar.xaxis")
+                ForEach(summary.featureMetrics) { metric in
+                    featureRow(metric)
+                }
+            }
+            .padding(16)
+            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(cardBorder)
 
-            ForEach(Array(summary.warnings.enumerated()), id: \.offset) { _, warning in
-                HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 13) {
+                sectionTitle("Raw 3D measurements", icon: "ruler.fill")
+
+                ForEach(summary.surfaceMeasurements) { measurement in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(measurement.title)
+                                .font(.subheadline.bold())
+                            Text(measurement.explanation)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.44))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 10)
+
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text("\(String(format: measurement.unit == "ratio" ? "%.3f" : "%.2f", measurement.value)) \(measurement.unit)")
+                                .font(.subheadline.bold().monospacedDigit())
+                            Text("C \(measurement.confidence)%")
+                                .font(.caption2.bold())
+                                .foregroundStyle(confidenceColor(measurement.confidence))
+                        }
+                    }
+
+                    Divider().overlay(.white.opacity(0.08))
+                }
+            }
+            .padding(16)
+            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(cardBorder)
+        }
+    }
+
+    private var symmetrySection: some View {
+        VStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle("Региональная 3D-симметрия", icon: "face.smiling")
+
+                ForEach(summary.regionalSymmetry) { region in
+                    VStack(spacing: 7) {
+                        HStack {
+                            Text(region.title)
+                                .font(.subheadline.bold())
+                            Spacer()
+                            Text(String(format: "%.2f мм", region.errorMM))
+                                .font(.subheadline.bold().monospacedDigit())
+                            Text("C \(region.confidence)%")
+                                .font(.caption2.bold())
+                                .foregroundStyle(confidenceColor(region.confidence))
+                        }
+
+                        GeometryReader { geometry in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(.white.opacity(0.08))
+                                Capsule()
+                                    .fill(scoreGradient)
+                                    .frame(width: geometry.size.width * CGFloat(max(0, min(region.score, 100)) / 100))
+                            }
+                        }
+                        .frame(height: 7)
+                    }
+
+                    Divider().overlay(.white.opacity(0.08))
+                }
+            }
+            .padding(16)
+            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(cardBorder)
+
+            VStack(alignment: .leading, spacing: 12) {
+                sectionTitle("Карта асимметрии", icon: "circle.lefthalf.filled")
+                MeshPreviewView(document: document, mode: .asymmetry)
+                    .frame(height: 320)
+                    .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 18))
+
+                HStack {
+                    heatLegend(.green, "стабильно")
+                    heatLegend(.yellow, "среднее")
+                    heatLegend(.red, "выше")
+                }
+            }
+            .padding(14)
+            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(cardBorder)
+        }
+    }
+
+    private var meshSection: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            sectionTitle("3D mesh", icon: "cube.transparent")
+
+            MeshPreviewView(document: document, mode: meshMode)
+                .frame(height: 360)
+                .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 18))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(MeshDisplayMode.allCases) { mode in
+                        Button(mode.title) {
+                            meshMode = mode
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(meshMode == mode ? accent : Color.white.opacity(0.07), in: Capsule())
+                        .foregroundStyle(meshMode == mode ? Color.black : Color.white)
+                    }
+                }
+            }
+
+            Text("Проведи пальцем по модели для вращения, сведи или разведи пальцы для масштаба.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.42))
+        }
+        .padding(14)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+        .overlay(cardBorder)
+    }
+
+    private var warningsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Ограничения", icon: "exclamationmark.triangle")
+
+            ForEach(summary.warnings, id: \.self) { warning in
+                HStack(alignment: .top, spacing: 9) {
                     Circle()
                         .fill(Color.orange)
-                        .frame(width: 7, height: 7)
+                        .frame(width: 5, height: 5)
                         .padding(.top, 6)
-
                     Text(warning)
                         .font(.footnote)
                         .foregroundStyle(.white.opacity(0.70))
@@ -352,11 +424,10 @@ struct ResultsView: View {
         }
     }
 
-    private var noticeSection: some View {
+    private var noticeCard: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "shield.lefthalf.filled")
                 .foregroundStyle(accent)
-
             Text(document.notice)
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.55))
@@ -401,20 +472,7 @@ struct ResultsView: View {
         }
     }
 
-    private var reliabilityBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(reliabilityColor)
-                .frame(width: 7, height: 7)
-            Text("Надёжность: \(summary.reliability)")
-                .font(.caption.bold())
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(.white.opacity(0.06), in: Capsule())
-    }
-
-    private func componentRow(_ metric: FeatureMetric) -> some View {
+    private func featureRow(_ metric: FeatureMetric) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(metric.title)
@@ -427,26 +485,35 @@ struct ResultsView: View {
 
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.08))
                     Capsule()
-                        .fill(.white.opacity(0.08))
-                    Capsule()
-                        .fill(componentGradient)
+                        .fill(scoreGradient)
                         .frame(width: geometry.size.width * CGFloat(max(0, min(metric.score, 100)) / 100))
                 }
             }
             .frame(height: 7)
 
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .top) {
                 Text(metric.explanation)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.50))
+                    .foregroundStyle(.white.opacity(0.48))
                     .fixedSize(horizontal: false, vertical: true)
 
                 Spacer(minLength: 8)
 
-                Text("\(String(format: "%.2f", metric.rawValue)) \(metric.rawUnit)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.38))
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(String(format: "%.2f", metric.rawValue)) \(metric.rawUnit)")
+                        .font(.caption2.monospacedDigit())
+                    Text("Confidence \(metric.confidence)%")
+                        .font(.caption2.bold())
+                        .foregroundStyle(confidenceColor(metric.confidence))
+                    if metric.crossScanSpread > 0 {
+                        Text("spread \(String(format: "%.2f", metric.crossScanSpread))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.34))
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.48))
             }
         }
         .padding(.vertical, 5)
@@ -474,40 +541,27 @@ struct ResultsView: View {
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func meshStat(_ title: String, _ value: String) -> some View {
-        VStack(spacing: 3) {
-            Text(value)
-                .font(.caption.bold().monospacedDigit())
+    private func metricTile(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.caption2)
-                .foregroundStyle(.white.opacity(0.42))
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func measurementTile(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.48))
+                .foregroundStyle(.white.opacity(0.43))
             Text(value)
-                .font(.headline.monospacedDigit())
+                .font(.subheadline.bold().monospacedDigit())
                 .lineLimit(1)
-                .minimumScaleFactor(0.65)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+        .padding(10)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func heatLegend(color: Color, text: String) -> some View {
+    private func heatLegend(_ color: Color, _ text: String) -> some View {
         HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
+            Circle().fill(color).frame(width: 7, height: 7)
             Text(text)
                 .font(.caption2)
-                .foregroundStyle(.white.opacity(0.58))
+                .foregroundStyle(.white.opacity(0.54))
         }
         .frame(maxWidth: .infinity)
     }
@@ -517,31 +571,33 @@ struct ResultsView: View {
         showingShareSheet = !shareItems.isEmpty
     }
 
-    private var depthFusionDescription: String {
-        if summary.depthFusion.applied {
-            return "Итоговая сетка уточнена временной медианой нескольких синхронных карт глубины. Выбросы отбрасываются, а максимальная коррекция каждой вершины ограничена."
-        }
+    private func confidenceColor(_ confidence: Int) -> Color {
+        if confidence >= 82 { return accent }
+        if confidence >= 62 { return .yellow }
+        return .orange
+    }
 
-        return "Карты глубины были получены, но не прошли контроль покрытия, остатка или временной стабильности. Для результата используется безопасная медианная ARKit-сетка."
+    private var reliabilityBadge: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(reliabilityColor)
+                .frame(width: 7, height: 7)
+            Text("Надёжность: \(summary.reliability)")
+                .font(.caption.bold())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.white.opacity(0.06), in: Capsule())
     }
 
     private var categoryDescription: String {
         if !summary.categoryIsFinal {
             if summary.repeatability.complete {
-                return "Категория скрыта: три скана расходятся сильнее допуска. Посмотри карту погрешности и повтори серию."
+                return "Категория скрыта: три скана расходятся сильнее допуска. Повтори серию и посмотри карту погрешности."
             }
-            return "Категория пока не финальная. Выполни три последовательных скана, чтобы приложение проверило повторяемость формы."
+            return "Категория пока предварительная. После трёх сканов приложение сравнит каждую вершину и рассчитает confidence отдельных метрик."
         }
-
-        switch summary.category {
-        case "SUB 3": return "Нижний диапазон экспериментальной шкалы после проверки повторяемости."
-        case "SUB 5": return "Ниже среднего диапазона текущей экспериментальной калибровки."
-        case "LTN": return "Нижняя часть среднего диапазона текущей экспериментальной калибровки."
-        case "MTN": return "Средняя зона текущей экспериментальной калибровки."
-        case "HTN": return "Верхняя часть среднего диапазона текущей экспериментальной калибровки."
-        case "CHAD": return "Верхний диапазон демонстрационной шкалы, подтверждённый серией сканов."
-        default: return "Результат требует повторного сканирования."
-        }
+        return "Финальная категория разблокирована после проверки повторяемости трёх TrueDepth-сканов."
     }
 
     private var repeatabilityColor: Color {
@@ -570,23 +626,9 @@ struct ResultsView: View {
         )
     }
 
-    private var componentGradient: LinearGradient {
-        LinearGradient(
-            colors: [accent.opacity(0.65), accent],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
-
     private var cardBorder: some View {
         RoundedRectangle(cornerRadius: 22)
             .stroke(.white.opacity(0.10), lineWidth: 1)
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
     }
 }
 

@@ -88,6 +88,12 @@ enum ReliabilityAnalyzer {
 
         let finalScore = median(scanScores.isEmpty ? [latest.metrics.overallPSLScore] : scanScores)
         let averagedFeatures = aggregateFeatures(finalSet.map { $0.metrics.featureMetrics })
+        let averagedMeasurements = aggregateMeasurements(finalSet.map { $0.metrics.surfaceMeasurements })
+        let averagedRegionalSymmetry = aggregateRegionalSymmetry(finalSet.map { $0.metrics.regionalSymmetry })
+        let averagedSurfaceMaps = aggregateSurfaceMaps(
+            finalSet.map { $0.metrics.surfaceMaps },
+            vertexCount: latest.vertexCount
+        )
         let quality = Int(median(scanQualities.map { Float($0) }).rounded())
         let finalCategory: String
         let categoryIsFinal: Bool
@@ -189,12 +195,15 @@ enum ReliabilityAnalyzer {
             depthFusion: latest.metrics.depthFusion,
             repeatability: repeatability,
             featureMetrics: averagedFeatures.isEmpty ? latest.metrics.featureMetrics : averagedFeatures,
+            surfaceMeasurements: averagedMeasurements.isEmpty ? latest.metrics.surfaceMeasurements : averagedMeasurements,
+            regionalSymmetry: averagedRegionalSymmetry.isEmpty ? latest.metrics.regionalSymmetry : averagedRegionalSymmetry,
+            surfaceMaps: averagedSurfaceMaps,
             warnings: warnings
         )
 
         let document = FaceScanDocument(
-            format: "psl-truedepth-reliability-session",
-            version: 4,
+            format: "psl-truedepth-feature-session",
+            version: 5,
             createdAt: Date(),
             deviceModel: latest.deviceModel,
             operatingSystem: latest.operatingSystem,
@@ -232,6 +241,9 @@ enum ReliabilityAnalyzer {
             depthFusion: metrics.depthFusion,
             repeatability: metrics.repeatability,
             featureMetrics: metrics.featureMetrics,
+            surfaceMeasurements: metrics.surfaceMeasurements,
+            regionalSymmetry: metrics.regionalSymmetry,
+            surfaceMaps: metrics.surfaceMaps,
             warnings: metrics.warnings
         )
     }
@@ -245,15 +257,136 @@ enum ReliabilityAnalyzer {
             }
             guard !matches.isEmpty else { return nil }
 
+            let values = matches.map { $0.rawValue }
+            let spread = (values.max() ?? 0) - (values.min() ?? 0)
+            let measurementAgreement = confidenceForSpread(
+                spread,
+                unit: metric.rawUnit
+            )
+            let sourceConfidence = Int(median(matches.map { Float($0.confidence) }).rounded())
+
             return FeatureMetric(
                 id: metric.id,
                 title: metric.title,
                 score: median(matches.map { $0.score }),
-                rawValue: median(matches.map { $0.rawValue }),
+                rawValue: median(values),
                 rawUnit: metric.rawUnit,
+                confidence: min(sourceConfidence, measurementAgreement),
+                crossScanSpread: spread,
                 explanation: metric.explanation
             )
         }
+    }
+
+    private static func aggregateMeasurements(
+        _ groups: [[SurfaceMeasurement]]
+    ) -> [SurfaceMeasurement] {
+        guard let reference = groups.first else { return [] }
+
+        return reference.compactMap { measurement in
+            let matches = groups.compactMap { group in
+                group.first { $0.id == measurement.id }
+            }
+            guard !matches.isEmpty else { return nil }
+
+            let values = matches.map { $0.value }
+            let spread = (values.max() ?? 0) - (values.min() ?? 0)
+            let sourceConfidence = Int(median(matches.map { Float($0.confidence) }).rounded())
+            let agreement = confidenceForSpread(spread, unit: measurement.unit)
+
+            return SurfaceMeasurement(
+                id: measurement.id,
+                title: measurement.title,
+                value: median(values),
+                unit: measurement.unit,
+                confidence: min(sourceConfidence, agreement),
+                explanation: measurement.explanation + " Разброс между сканами: " + String(format: "%.2f %@.", spread, measurement.unit)
+            )
+        }
+    }
+
+    private static func aggregateRegionalSymmetry(
+        _ groups: [[RegionalSymmetryMetric]]
+    ) -> [RegionalSymmetryMetric] {
+        guard let reference = groups.first else { return [] }
+
+        return reference.compactMap { region in
+            let matches = groups.compactMap { group in
+                group.first { $0.id == region.id }
+            }
+            guard !matches.isEmpty else { return nil }
+
+            let errors = matches.map { $0.errorMM }
+            let spread = (errors.max() ?? 0) - (errors.min() ?? 0)
+            let sourceConfidence = Int(median(matches.map { Float($0.confidence) }).rounded())
+            let agreement = confidenceForSpread(spread, unit: "мм")
+
+            return RegionalSymmetryMetric(
+                id: region.id,
+                title: region.title,
+                errorMM: median(errors),
+                score: median(matches.map { $0.score }),
+                confidence: min(sourceConfidence, agreement)
+            )
+        }
+    }
+
+    private static func aggregateSurfaceMaps(
+        _ maps: [SurfaceMapData],
+        vertexCount: Int
+    ) -> SurfaceMapData {
+        let validAsymmetry = maps
+            .map { $0.vertexAsymmetryMM }
+            .filter { $0.count == vertexCount }
+        let validCurvature = maps
+            .map { $0.vertexCurvatureIndex }
+            .filter { $0.count == vertexCount }
+
+        let asymmetry = coordinateMedianValues(
+            validAsymmetry,
+            fallbackCount: vertexCount
+        )
+        let curvature = coordinateMedianValues(
+            validCurvature,
+            fallbackCount: vertexCount
+        )
+
+        return SurfaceMapData(
+            vertexAsymmetryMM: asymmetry,
+            vertexCurvatureIndex: curvature
+        )
+    }
+
+    private static func coordinateMedianValues(
+        _ values: [[Float]],
+        fallbackCount: Int
+    ) -> [Float] {
+        guard let first = values.first, !first.isEmpty else {
+            return Array(repeating: 0, count: fallbackCount)
+        }
+        guard values.allSatisfy({ $0.count == first.count }) else {
+            return first
+        }
+        return first.indices.map { index in
+            median(values.map { $0[index] })
+        }
+    }
+
+    private static func confidenceForSpread(
+        _ spread: Float,
+        unit: String
+    ) -> Int {
+        let tolerance: Float
+        switch unit {
+        case "мм", "мм ошибки": tolerance = 4.0
+        case "°": tolerance = 18.0
+        case "ratio", "jaw/cheek", "W/H": tolerance = 0.16
+        case "индекс": tolerance = 1.8
+        default: tolerance = max(abs(spread) * 2, 1)
+        }
+
+        let value = clamp(1 - spread / max(tolerance, 0.0001), lower: 0, upper: 1)
+        return Int((35 + value * 65).rounded())
     }
 
     private static func coordinateMedianMesh(_ meshes: [[SIMD3<Float>]]) -> [SIMD3<Float>] {

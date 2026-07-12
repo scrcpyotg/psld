@@ -549,7 +549,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                let fileName = "PSL-TrueDepth-v4-\(formatter.string(from: Date())).json"
+                let fileName = "PSL-TrueDepth-v5-\(formatter.string(from: Date())).json"
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
                 try data.write(to: url, options: .atomic)
                 let objURL = try MeshExporter.writeOBJ(document: consolidated.document)
@@ -672,6 +672,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         let quality = Int(clamp(qualityFloat.rounded(), lower: 0, upper: 100))
         let analysis = analyzeSurface(
             mesh: analysisMesh,
+            triangleIndices: triangles,
             widthMM: widthMM,
             heightMM: heightMM,
             depthMM: depthMM,
@@ -710,6 +711,9 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
                 vertexCount: vertexCount
             ),
             featureMetrics: analysis.features,
+            surfaceMeasurements: analysis.measurements,
+            regionalSymmetry: analysis.regionalSymmetry,
+            surfaceMaps: analysis.surfaceMaps,
             warnings: analysis.warnings
         )
 
@@ -721,8 +725,8 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         }
 
         let document = FaceScanDocument(
-            format: "psl-truedepth-guided-scan",
-            version: 4,
+            format: "psl-truedepth-feature-scan",
+            version: 5,
             createdAt: Date(),
             deviceModel: deviceModel(),
             operatingSystem: UIDevice.current.systemVersion,
@@ -734,7 +738,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             vertices: vectors,
             arkitVertices: arkitVectors,
             triangleIndices: triangles,
-            notice: "Экспериментальный анализ наружной поверхности лица. В режиме Depth Fusion ARKit-сетка корректируется несколькими синхронными картами TrueDepth с ограничением выбросов и временной медианой. Это не показывает внутренние кости, не является медицинским исследованием и не измеряет объективную привлекательность."
+            notice: "Экспериментальный анализ наружной поверхности лица. Метрики v0.5 используют 3D-сетку, региональную симметрию, локальную кривизну и Depth Fusion. Они не показывают внутренние кости, не являются медицинским исследованием и не измеряют объективную привлекательность."
         )
 
         let summary = ScanSummary(
@@ -755,6 +759,9 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
             depthFusion: fusion.metrics,
             repeatability: metrics.repeatability,
             featureMetrics: analysis.features,
+            surfaceMeasurements: analysis.measurements,
+            regionalSymmetry: analysis.regionalSymmetry,
+            surfaceMaps: analysis.surfaceMaps,
             warnings: analysis.warnings
         )
 
@@ -763,6 +770,7 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
 
     private func analyzeSurface(
         mesh: [SIMD3<Float>],
+        triangleIndices: [Int],
         widthMM: Float,
         heightMM: Float,
         depthMM: Float,
@@ -774,252 +782,32 @@ final class FaceScanner: NSObject, ObservableObject, ARSessionDelegate {
         rejectedFrames: Int,
         depthFusion: DepthFusionMetrics
     ) -> SurfaceAnalysis {
-        guard
-            let minX = mesh.map(\.x).min(),
-            let maxX = mesh.map(\.x).max(),
-            let minY = mesh.map(\.y).min(),
-            let maxY = mesh.map(\.y).max()
-        else {
-            return SurfaceAnalysis.empty
-        }
-
-        let centerX = (minX + maxX) / 2
-        let centerY = (minY + maxY) / 2
-        let halfWidth = max((maxX - minX) / 2, 0.0001)
-        let halfHeight = max((maxY - minY) / 2, 0.0001)
-        let centerZ = median(mesh.map(\.z))
-
-        var points = mesh.map {
-            SurfacePoint(
-                x: ($0.x - centerX) / halfWidth,
-                y: ($0.y - centerY) / halfHeight,
-                z: ($0.z - centerZ) / (halfWidth * 2)
-            )
-        }
-
-        let rawNose = zoneDepth(points) {
-            abs($0.x) < 0.14 && $0.y > 0.02 && $0.y < 0.52
-        }
-        let rawLateral = zoneDepth(points) {
-            abs($0.x) > 0.36 && abs($0.x) < 0.68 && $0.y > -0.02 && $0.y < 0.42
-        }
-        let forwardSign: Float = rawNose >= rawLateral ? 1 : -1
-        points = points.map { SurfacePoint(x: $0.x, y: $0.y, z: $0.z * forwardSign) }
-
-        let cheekDepth = zoneDepth(points) {
-            abs($0.x) > 0.36 && abs($0.x) < 0.72 && $0.y > -0.08 && $0.y < 0.38
-        }
-        let templeDepth = zoneDepth(points) {
-            abs($0.x) > 0.66 && abs($0.x) < 0.94 && $0.y > 0.28 && $0.y < 0.72
-        }
-        let jawDepth = zoneDepth(points) {
-            abs($0.x) > 0.36 && abs($0.x) < 0.76 && $0.y > -0.68 && $0.y < -0.22
-        }
-        let chinDepth = zoneDepth(points) {
-            abs($0.x) < 0.24 && $0.y > -0.96 && $0.y < -0.56
-        }
-        let mouthDepth = zoneDepth(points) {
-            abs($0.x) < 0.34 && $0.y > -0.46 && $0.y < -0.10
-        }
-        let midCenterDepth = zoneDepth(points) {
-            abs($0.x) < 0.28 && $0.y > -0.04 && $0.y < 0.38
-        }
-        let midSideDepth = zoneDepth(points) {
-            abs($0.x) > 0.30 && abs($0.x) < 0.58 && $0.y > -0.04 && $0.y < 0.38
-        }
-        let noseDepth = zoneDepth(points) {
-            abs($0.x) < 0.13 && $0.y > 0.02 && $0.y < 0.52
-        }
-        let noseSideDepth = zoneDepth(points) {
-            abs($0.x) > 0.17 && abs($0.x) < 0.34 && $0.y > 0.02 && $0.y < 0.52
-        }
-
-        let cheekWidth = bandHalfWidth(points, yRange: -0.08...0.34)
-        let jawWidth = bandHalfWidth(points, yRange: -0.70...(-0.24))
-        let jawWidthRatio = jawWidth / max(cheekWidth, 0.001)
-
-        let widthHeightRatio = widthMM / max(heightMM, 0.001)
-        let depthWidthRatio = depthMM / max(widthMM, 0.001)
-        let zygomaticProjection = cheekDepth - templeDepth
-        let chinProjection = chinDepth - mouthDepth
-        let midfaceProjection = midCenterDepth - midSideDepth
-        let nasalProjection = noseDepth - noseSideDepth
-        let angularityValue = (
-            abs(cheekDepth - jawDepth) +
-            abs(cheekDepth - templeDepth) +
-            abs(chinDepth - mouthDepth)
-        ) / 3
-
-        let symmetryScore = clamp(100 - symmetryErrorMM * 10.5, lower: 15, upper: 100)
-        let harmonyScore =
-            bellScore(widthHeightRatio, target: 0.78, tolerance: 0.18) * 0.62 +
-            bellScore(depthWidthRatio, target: 0.50, tolerance: 0.22) * 0.38
-        let angularityScore = bellScore(angularityValue, target: 0.035, tolerance: 0.035)
-        let zygomaticScore = bellScore(zygomaticProjection, target: 0.025, tolerance: 0.040)
-        let mandibleScore =
-            bellScore(jawWidthRatio, target: 0.80, tolerance: 0.20) * 0.72 +
-            bellScore(abs(cheekDepth - jawDepth), target: 0.030, tolerance: 0.040) * 0.28
-        let chinScore = bellScore(chinProjection, target: 0.015, tolerance: 0.050)
-        let midfaceScore = bellScore(midfaceProjection, target: 0.025, tolerance: 0.050)
-        let nasalScore = bellScore(nasalProjection, target: 0.055, tolerance: 0.060)
-
-        let features = [
-            FeatureMetric(
-                id: "symmetry3d",
-                title: "3D-симметрия",
-                score: symmetryScore,
-                rawValue: symmetryErrorMM,
-                rawUnit: "мм ошибки",
-                explanation: "Средняя дистанция между одной стороной поверхности и зеркальной второй стороной."
-            ),
-            FeatureMetric(
-                id: "harmony3d",
-                title: "3D-гармония",
-                score: harmonyScore,
-                rawValue: widthHeightRatio,
-                rawUnit: "W/H",
-                explanation: "Баланс ширины, высоты и общей глубины наружной сетки."
-            ),
-            FeatureMetric(
-                id: "angularity",
-                title: "Feature angularity",
-                score: angularityScore,
-                rawValue: angularityValue * 100,
-                rawUnit: "% ширины",
-                explanation: "Изменение глубины между височной, скуловой, нижнечелюстной и подбородочной зонами."
-            ),
-            FeatureMetric(
-                id: "zygomatic",
-                title: "Zygomatic proxy",
-                score: zygomaticScore,
-                rawValue: zygomaticProjection * 100,
-                rawUnit: "% ширины",
-                explanation: "Наружная 3D-проекция поверхности скуловой зоны относительно височной зоны."
-            ),
-            FeatureMetric(
-                id: "mandible",
-                title: "Mandibular proxy",
-                score: mandibleScore,
-                rawValue: jawWidthRatio,
-                rawUnit: "jaw/cheek",
-                explanation: "Соотношение ширины нижней зоны и скул, дополненное перепадом глубины."
-            ),
-            FeatureMetric(
-                id: "chin",
-                title: "Chin projection",
-                score: chinScore,
-                rawValue: chinProjection * 100,
-                rawUnit: "% ширины",
-                explanation: "Проекция наружной поверхности подбородка относительно околоротовой зоны."
-            ),
-            FeatureMetric(
-                id: "midface",
-                title: "Midface proxy",
-                score: midfaceScore,
-                rawValue: midfaceProjection * 100,
-                rawUnit: "% ширины",
-                explanation: "Глубина центральной средней зоны относительно латеральной поверхности."
-            ),
-            FeatureMetric(
-                id: "nasal",
-                title: "Nasal projection",
-                score: nasalScore,
-                rawValue: nasalProjection * 100,
-                rawUnit: "% ширины",
-                explanation: "Проекция поверхности носовой зоны относительно соседней средней зоны."
-            )
-        ]
-
-        let weights: [Float] = [0.20, 0.18, 0.12, 0.14, 0.14, 0.08, 0.08, 0.06]
-        let scores = features.map(\.score)
-        let weightedMean = zip(scores, weights).reduce(Float.zero) { partial, pair in
-            partial + pair.0 * pair.1
-        }
-        let weakestScore = scores.min() ?? weightedMean
-        let composite = weightedMean * 0.88 + weakestScore * 0.12
-        let normalized = clamp(composite / 100, lower: 0, upper: 1)
-        let pslScore = clamp(
-            1.2 + 7.8 * Float(pow(Double(normalized), 1.8)),
-            lower: 1,
-            upper: 9
+        let result = SurfaceMetricAnalyzer.analyze(
+            mesh: mesh,
+            triangleIndices: triangleIndices,
+            widthMM: widthMM,
+            heightMM: heightMM,
+            depthMM: depthMM,
+            symmetryErrorMM: symmetryErrorMM,
+            stabilityErrorMM: stabilityErrorMM,
+            quality: quality,
+            yawCoverageDegrees: yawCoverageDegrees,
+            acceptedFrames: acceptedFrames,
+            rejectedFrames: rejectedFrames,
+            depthFusion: depthFusion
         )
-
-        let rejectionRatio = Float(rejectedFrames) / Float(max(acceptedFrames + rejectedFrames, 1))
-        let depthUncertainty: Float
-        if depthFusion.applied {
-            depthUncertainty =
-                max(0, 42 - depthFusion.coveragePercent) * 0.004 +
-                max(0, depthFusion.medianResidualMM - 8) * 0.010 +
-                max(0, depthFusion.temporalNoiseMM - 2.5) * 0.018
-        } else {
-            depthUncertainty = 0.24
-        }
-
-        let uncertainty = clamp(
-            0.20 +
-            Float(100 - quality) * 0.009 +
-            max(0, 24 - yawCoverageDegrees) * 0.012 +
-            rejectionRatio * 0.30 +
-            max(0, stabilityErrorMM - 0.7) * 0.08 +
-            depthUncertainty,
-            lower: 0.20,
-            upper: 1.45
-        )
-
-        let low = clamp(pslScore - uncertainty, lower: 1, upper: 10)
-        let high = clamp(pslScore + uncertainty, lower: 1, upper: 10)
-        let reliability: String
-        if quality >= 86 &&
-            stabilityErrorMM <= 0.85 &&
-            yawCoverageDegrees >= 25 &&
-            depthFusion.applied &&
-            depthFusion.coveragePercent >= 35 &&
-            depthFusion.medianResidualMM <= 16 {
-            reliability = "Высокая"
-        } else if quality >= 68 &&
-                    stabilityErrorMM <= 1.45 &&
-                    yawCoverageDegrees >= 18 {
-            reliability = "Средняя"
-        } else {
-            reliability = "Низкая"
-        }
-
-        var warnings = [String]()
-        if quality < 70 {
-            warnings.append("Качество скана ниже рекомендуемого: диапазон результата расширен.")
-        }
-        if yawCoverageDegrees < 22 {
-            warnings.append("Недостаточное покрытие боковых ракурсов. Поверни голову чуть сильнее в обе стороны.")
-        }
-        if stabilityErrorMM > 1.20 {
-            warnings.append("Сетка заметно менялась между кадрами. Держи мимику и расстояние стабильнее.")
-        }
-        if rejectionRatio > 0.32 {
-            warnings.append("Много кадров отклонено из-за движения, моргания или выражения лица.")
-        }
-        if !depthFusion.applied {
-            warnings.append("Depth Fusion не прошёл контроль покрытия или согласованности. Балл рассчитан по медианной ARKit-сетке, а диапазон расширен.")
-        } else {
-            if depthFusion.coveragePercent < 35 {
-                warnings.append("Карта глубины уточнила только часть вершин. Попробуй более ровный свет и медленнее поверни голову.")
-            }
-            if depthFusion.medianResidualMM > 16 {
-                warnings.append("ARKit mesh и плотная карта глубины расходились сильнее желаемого; влияние Depth Fusion автоматически ограничено.")
-            }
-            if depthFusion.temporalNoiseMM > 5 {
-                warnings.append("Глубина менялась между кадрами. Держи расстояние и выражение лица стабильнее.")
-            }
-        }
-        warnings.append("Zygomatic, maxilla и mandible представлены только наружными 3D-прокси поверхности, а не измерением костей.")
 
         return SurfaceAnalysis(
-            pslScore: pslScore,
-            scoreRangeLow: low,
-            scoreRangeHigh: high,
-            category: category(for: pslScore),
-            reliability: reliability,
-            features: features,
-            warnings: warnings
+            pslScore: result.pslScore,
+            scoreRangeLow: result.scoreRangeLow,
+            scoreRangeHigh: result.scoreRangeHigh,
+            category: result.category,
+            reliability: result.reliability,
+            features: result.features,
+            measurements: result.measurements,
+            regionalSymmetry: result.regionalSymmetry,
+            surfaceMaps: result.surfaceMaps,
+            warnings: result.warnings
         )
     }
 
@@ -1206,6 +994,9 @@ private struct SurfaceAnalysis {
     let category: String
     let reliability: String
     let features: [FeatureMetric]
+    let measurements: [SurfaceMeasurement]
+    let regionalSymmetry: [RegionalSymmetryMetric]
+    let surfaceMaps: SurfaceMapData
     let warnings: [String]
 
     static let empty = SurfaceAnalysis(
@@ -1215,6 +1006,9 @@ private struct SurfaceAnalysis {
         category: "НЕТ ЗАМЕРА",
         reliability: "Низкая",
         features: [],
+        measurements: [],
+        regionalSymmetry: [],
+        surfaceMaps: .empty(vertexCount: 0),
         warnings: ["Не удалось выделить поверхность лица для расчёта."]
     )
 }

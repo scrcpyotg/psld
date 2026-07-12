@@ -75,7 +75,7 @@ enum MeshExporter {
     ) -> URL {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let name = "PSL-TrueDepth-v4-\(formatter.string(from: document.createdAt)).\(fileExtension)"
+        let name = "PSL-TrueDepth-v5-\(formatter.string(from: document.createdAt)).\(fileExtension)"
         return FileManager.default.temporaryDirectory.appendingPathComponent(name)
     }
 

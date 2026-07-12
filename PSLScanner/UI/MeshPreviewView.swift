@@ -6,6 +6,8 @@ enum MeshDisplayMode: String, CaseIterable, Identifiable {
     case fused
     case base
     case uncertainty
+    case asymmetry
+    case curvature
 
     var id: String { rawValue }
 
@@ -14,6 +16,8 @@ enum MeshDisplayMode: String, CaseIterable, Identifiable {
         case .fused: return "Depth Fusion"
         case .base: return "ARKit base"
         case .uncertainty: return "Погрешность"
+        case .asymmetry: return "Асимметрия"
+        case .curvature: return "Кривизна"
         }
     }
 }
@@ -51,7 +55,7 @@ struct MeshPreviewView: UIViewRepresentable {
             selectedVertices = document.arkitVertices.isEmpty
                 ? document.vertices
                 : document.arkitVertices
-        case .fused, .uncertainty:
+        case .fused, .uncertainty, .asymmetry, .curvature:
             selectedVertices = document.vertices
         }
 
@@ -88,13 +92,10 @@ struct MeshPreviewView: UIViewRepresentable {
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
+        let heatValues = valuesForHeatMode(vertexCount: centeredVertices.count)
         let geometry: SCNGeometry
-        if mode == .uncertainty,
-           document.metrics.repeatability.vertexDeviationMM.count == centeredVertices.count,
-           document.metrics.repeatability.scanCount >= 2 {
-            let colorSource = makeColorSource(
-                deviations: document.metrics.repeatability.vertexDeviationMM
-            )
+        if let heatValues {
+            let colorSource = makeColorSource(values: heatValues)
             geometry = SCNGeometry(
                 sources: [vertexSource, colorSource],
                 elements: [element]
@@ -119,11 +120,11 @@ struct MeshPreviewView: UIViewRepresentable {
         )
         scene.rootNode.addChildNode(meshNode)
 
-        if mode == .uncertainty {
+        if heatValues != nil {
             let wireGeometry = SCNGeometry(sources: [vertexSource], elements: [element])
             let overlay = SCNMaterial()
-            overlay.diffuse.contents = UIColor.black.withAlphaComponent(0.38)
-            overlay.emission.contents = UIColor.black.withAlphaComponent(0.30)
+            overlay.diffuse.contents = UIColor.black.withAlphaComponent(0.34)
+            overlay.emission.contents = UIColor.black.withAlphaComponent(0.28)
             overlay.fillMode = .lines
             overlay.isDoubleSided = true
             overlay.lightingModel = .constant
@@ -143,13 +144,13 @@ struct MeshPreviewView: UIViewRepresentable {
 
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = mode == .uncertainty ? 850 : 500
+        ambient.intensity = heatValues == nil ? 500 : 850
         ambient.color = UIColor.white
         let ambientNode = SCNNode()
         ambientNode.light = ambient
         scene.rootNode.addChildNode(ambientNode)
 
-        if mode != .uncertainty {
+        if heatValues == nil {
             let key = SCNLight()
             key.type = .omni
             key.intensity = 700
@@ -163,6 +164,29 @@ struct MeshPreviewView: UIViewRepresentable {
         }
 
         return scene
+    }
+
+    private func valuesForHeatMode(vertexCount: Int) -> [Float]? {
+        switch mode {
+        case .uncertainty:
+            let values = document.metrics.repeatability.vertexDeviationMM
+            guard values.count == vertexCount,
+                  document.metrics.repeatability.scanCount >= 2 else { return nil }
+            return values.map { max(0, min($0 / 4.0, 1)) }
+
+        case .asymmetry:
+            let values = document.metrics.surfaceMaps.vertexAsymmetryMM
+            guard values.count == vertexCount else { return nil }
+            return values.map { max(0, min($0 / 4.0, 1)) }
+
+        case .curvature:
+            let values = document.metrics.surfaceMaps.vertexCurvatureIndex
+            guard values.count == vertexCount else { return nil }
+            return values.map { max(0, min($0 / 100, 1)) }
+
+        case .fused, .base:
+            return nil
+        }
     }
 
     private var wireMaterial: SCNMaterial {
@@ -180,12 +204,12 @@ struct MeshPreviewView: UIViewRepresentable {
         return material
     }
 
-    private func makeColorSource(deviations: [Float]) -> SCNGeometrySource {
+    private func makeColorSource(values: [Float]) -> SCNGeometrySource {
         var components = [Float]()
-        components.reserveCapacity(deviations.count * 4)
+        components.reserveCapacity(values.count * 4)
 
-        for deviation in deviations {
-            let color = heatmap(deviationMM: deviation)
+        for value in values {
+            let color = heatmap(value: value)
             components.append(color.red)
             components.append(color.green)
             components.append(color.blue)
@@ -196,7 +220,7 @@ struct MeshPreviewView: UIViewRepresentable {
         return SCNGeometrySource(
             data: data,
             semantic: .color,
-            vectorCount: deviations.count,
+            vectorCount: values.count,
             usesFloatComponents: true,
             componentsPerVector: 4,
             bytesPerComponent: MemoryLayout<Float>.size,
@@ -205,8 +229,8 @@ struct MeshPreviewView: UIViewRepresentable {
         )
     }
 
-    private func heatmap(deviationMM: Float) -> (red: Float, green: Float, blue: Float) {
-        let t = max(0, min(deviationMM / 4.0, 1))
+    private func heatmap(value: Float) -> (red: Float, green: Float, blue: Float) {
+        let t = max(0, min(value, 1))
         if t <= 0.5 {
             let local = t / 0.5
             return (local, 1, 0.20 * (1 - local))

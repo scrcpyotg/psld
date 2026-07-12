@@ -1,8 +1,85 @@
 import SwiftUI
 
+enum RootTab: Hashable {
+    case scan
+    case history
+    case account
+}
+
 struct ContentView: View {
     @EnvironmentObject private var scanner: FaceScanner
+    @EnvironmentObject private var accountStore: LocalAccountStore
+    @EnvironmentObject private var historyStore: ScanHistoryStore
+    @EnvironmentObject private var biometricLock: BiometricLockController
     @Environment(\.scenePhase) private var scenePhase
+
+    @State private var selectedTab: RootTab = .scan
+
+    var body: some View {
+        Group {
+            if accountStore.profile == nil {
+                ProfileSetupView()
+            } else if biometricLock.isEnabled && !biometricLock.isUnlocked {
+                LockedAccountView()
+            } else {
+                mainTabs
+            }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear {
+            historyStore.configure(profileID: accountStore.profile?.id)
+        }
+        .onChange(of: accountStore.profile?.id) { profileID in
+            historyStore.configure(profileID: profileID)
+        }
+        .onChange(of: selectedTab) { tab in
+            if tab == .scan {
+                scanner.handleAppBecameActive()
+            } else if scanner.state != .scanning && scanner.state != .processing {
+                scanner.pauseSession()
+            }
+        }
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
+            case .active:
+                if selectedTab == .scan {
+                    scanner.handleAppBecameActive()
+                }
+            case .inactive, .background:
+                scanner.handleAppBecameInactive()
+                biometricLock.lock()
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    private var mainTabs: some View {
+        TabView(selection: $selectedTab) {
+            ScanFlowView()
+                .tabItem {
+                    Label("Скан", systemImage: "viewfinder")
+                }
+                .tag(RootTab.scan)
+
+            HistoryView(selectedTab: $selectedTab)
+                .tabItem {
+                    Label("История", systemImage: "clock.arrow.circlepath")
+                }
+                .tag(RootTab.history)
+
+            AccountView(selectedTab: $selectedTab)
+                .tabItem {
+                    Label("Кабинет", systemImage: "person.crop.circle")
+                }
+                .tag(RootTab.account)
+        }
+        .tint(Color(red: 0.56, green: 1.0, blue: 0.25))
+    }
+}
+
+private struct ScanFlowView: View {
+    @EnvironmentObject private var scanner: FaceScanner
 
     var body: some View {
         Group {
@@ -17,15 +94,125 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.28), value: scanner.state)
-        .onChange(of: scenePhase) { newPhase in
-            switch newPhase {
-            case .active:
-                scanner.handleAppBecameActive()
-            case .inactive, .background:
-                scanner.handleAppBecameInactive()
-            @unknown default:
-                break
+        .toolbar(
+            scanner.state == .scanning || scanner.state == .processing
+                ? .hidden
+                : .visible,
+            for: .tabBar
+        )
+    }
+}
+
+private struct ProfileSetupView: View {
+    @EnvironmentObject private var accountStore: LocalAccountStore
+    @State private var name = ""
+    private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            RadialGradient(
+                colors: [accent.opacity(0.18), .clear],
+                center: .topTrailing,
+                startRadius: 10,
+                endRadius: 520
+            )
+            .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 22) {
+                Spacer()
+
+                Image(systemName: "faceid")
+                    .font(.system(size: 54, weight: .semibold))
+                    .foregroundStyle(accent)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Личный кабинет")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
+                    Text("Имя и последние 20 анализов сохраняются только на этом iPhone. Аккаунт не отправляется на сервер.")
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                TextField("Как тебя называть", text: $name)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .padding(15)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 15)
+                            .stroke(.white.opacity(0.12), lineWidth: 1)
+                    }
+
+                Button {
+                    accountStore.createProfile(displayName: name)
+                } label: {
+                    Text("Создать локальный профиль")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 15))
+                        .foregroundStyle(.black)
+                }
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                .opacity(name.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 ? 0.45 : 1)
+
+                Text("TrueDepth-сканы содержат биометрическую геометрию поверхности лица. Не публикуй JSON/OBJ/PLY без необходимости.")
+                    .font(.caption)
+                    .foregroundStyle(.orange.opacity(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer()
             }
+            .padding(24)
+        }
+    }
+}
+
+private struct LockedAccountView: View {
+    @EnvironmentObject private var biometricLock: BiometricLockController
+    private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 58))
+                    .foregroundStyle(accent)
+
+                Text("Кабинет заблокирован")
+                    .font(.title2.bold())
+
+                Text("Разблокируй приложение через Face ID или код-пароль устройства.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.58))
+                    .multilineTextAlignment(.center)
+
+                Button {
+                    biometricLock.unlock()
+                } label: {
+                    Label("Разблокировать", systemImage: "faceid")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 15))
+                        .foregroundStyle(.black)
+                }
+
+                if let error = biometricLock.lastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(24)
+        }
+        .onAppear {
+            biometricLock.unlock()
         }
     }
 }
@@ -70,7 +257,7 @@ private struct ScannerCaptureView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("PSL SCANNER")
                     .font(.system(size: 18, weight: .black, design: .rounded))
-                Text("TrueDepth · guided scan · серия \(scanner.completedReliabilityScans + 1)/\(scanner.requiredReliabilityScans)")
+                Text("TrueDepth · v0.5 · серия \(scanner.completedReliabilityScans + 1)/\(scanner.requiredReliabilityScans)")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
             }

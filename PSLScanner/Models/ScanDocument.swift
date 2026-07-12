@@ -12,7 +12,38 @@ struct FeatureMetric: Codable, Identifiable, Hashable {
     let score: Float
     let rawValue: Float
     let rawUnit: String
+    let confidence: Int
+    let crossScanSpread: Float
     let explanation: String
+}
+
+struct SurfaceMeasurement: Codable, Identifiable, Hashable {
+    let id: String
+    let title: String
+    let value: Float
+    let unit: String
+    let confidence: Int
+    let explanation: String
+}
+
+struct RegionalSymmetryMetric: Codable, Identifiable, Hashable {
+    let id: String
+    let title: String
+    let errorMM: Float
+    let score: Float
+    let confidence: Int
+}
+
+struct SurfaceMapData: Codable, Hashable {
+    let vertexAsymmetryMM: [Float]
+    let vertexCurvatureIndex: [Float]
+
+    static func empty(vertexCount: Int) -> SurfaceMapData {
+        SurfaceMapData(
+            vertexAsymmetryMM: Array(repeating: 0, count: vertexCount),
+            vertexCurvatureIndex: Array(repeating: 0, count: vertexCount)
+        )
+    }
 }
 
 struct DepthFusionMetrics: Codable, Hashable {
@@ -115,6 +146,9 @@ struct ScanMetrics: Codable, Hashable {
     let depthFusion: DepthFusionMetrics
     let repeatability: RepeatabilityMetrics
     let featureMetrics: [FeatureMetric]
+    let surfaceMeasurements: [SurfaceMeasurement]
+    let regionalSymmetry: [RegionalSymmetryMetric]
+    let surfaceMaps: SurfaceMapData
     let warnings: [String]
 }
 
@@ -153,5 +187,8 @@ struct ScanSummary {
     let depthFusion: DepthFusionMetrics
     let repeatability: RepeatabilityMetrics
     let featureMetrics: [FeatureMetric]
+    let surfaceMeasurements: [SurfaceMeasurement]
+    let regionalSymmetry: [RegionalSymmetryMetric]
+    let surfaceMaps: SurfaceMapData
     let warnings: [String]
 }
