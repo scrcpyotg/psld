@@ -101,7 +101,7 @@ struct ResultsView: View {
 
                 VStack(alignment: .trailing, spacing: 8) {
                     Text(summary.category)
-                        .font(.title2.black())
+                        .font(.system(size: 22, weight: .black, design: .rounded))
                         .foregroundStyle(.black)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 8)
