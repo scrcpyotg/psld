@@ -85,7 +85,7 @@ struct ResultsView: View {
     private var topBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text("RESULTS v0.5")
+                Text("RESULTS v0.6")
                     .font(.system(size: 20, weight: .black, design: .rounded))
                 Text("TrueDepth · серия \(summary.repeatability.scanCount)/\(summary.repeatability.requiredScanCount)")
                     .font(.caption)

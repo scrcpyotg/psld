@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct AccountView: View {
     @EnvironmentObject private var accountStore: LocalAccountStore
@@ -10,6 +11,14 @@ struct AccountView: View {
     @State private var showingRename = false
     @State private var showingDeleteHistory = false
     @State private var showingDeleteProfile = false
+    @State private var showingExportPassword = false
+    @State private var showingImportPassword = false
+    @State private var showingFileImporter = false
+    @State private var showingShareSheet = false
+    @State private var backupPassword = ""
+    @State private var pendingImportURL: URL?
+    @State private var shareItems = [Any]()
+    @State private var alertMessage: String?
 
     private let accent = Color(red: 0.56, green: 1.0, blue: 0.25)
 
@@ -20,6 +29,7 @@ struct AccountView: View {
                     profileCard
                     statisticsCard
                     latestCard
+                    backupCard
                     privacyCard
                     dangerZone
                 }
@@ -33,6 +43,68 @@ struct AccountView: View {
         .sheet(isPresented: $showingRename) {
             renameSheet
         }
+        .sheet(isPresented: $showingExportPassword) {
+            passwordSheet(
+                title: "Пароль резервной копии",
+                buttonTitle: "Создать копию"
+            ) {
+                if let url = historyStore.createEncryptedBackup(password: backupPassword) {
+                    shareItems = [url]
+                    showingExportPassword = false
+                    showingShareSheet = true
+                } else {
+                    alertMessage = historyStore.lastError ?? "Не удалось создать копию."
+                }
+            }
+        }
+        .sheet(isPresented: $showingImportPassword) {
+            passwordSheet(
+                title: "Пароль для восстановления",
+                buttonTitle: "Восстановить"
+            ) {
+                guard let pendingImportURL else { return }
+                let success = historyStore.importEncryptedBackup(
+                    from: pendingImportURL,
+                    password: backupPassword
+                )
+                alertMessage = success
+                    ? (historyStore.lastMessage ?? "История восстановлена.")
+                    : (historyStore.lastError ?? "Не удалось восстановить историю.")
+                if success {
+                    showingImportPassword = false
+                }
+            }
+        }
+        .sheet(isPresented: $showingShareSheet) {
+            ShareSheet(items: shareItems)
+        }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: [.data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let source = urls.first else { return }
+                let accessed = source.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed { source.stopAccessingSecurityScopedResource() }
+                }
+                do {
+                    let destination = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("Imported-\(UUID().uuidString).pslbackup")
+                    try? FileManager.default.removeItem(at: destination)
+                    try FileManager.default.copyItem(at: source, to: destination)
+                    pendingImportURL = destination
+                    backupPassword = ""
+                    showingImportPassword = true
+                } catch {
+                    alertMessage = "Не удалось прочитать выбранный файл."
+                }
+            case .failure:
+                alertMessage = "Файл не выбран."
+            }
+        }
         .confirmationDialog(
             "Удалить всю историю анализов?",
             isPresented: $showingDeleteHistory,
@@ -43,34 +115,40 @@ struct AccountView: View {
             }
         }
         .confirmationDialog(
-            "Удалить локальный профиль и все анализы?",
+            "Удалить локальный профиль?",
             isPresented: $showingDeleteProfile,
             titleVisibility: .visible
         ) {
-            Button("Удалить профиль", role: .destructive) {
+            Button("Удалить профиль и историю", role: .destructive) {
                 historyStore.deleteAll()
-                biometricLock.isEnabled = false
                 accountStore.deleteProfile()
-                selectedTab = .scan
             }
+        }
+        .alert(
+            "PSL Scanner",
+            isPresented: Binding(
+                get: { alertMessage != nil },
+                set: { if !$0 { alertMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { alertMessage = nil }
+        } message: {
+            Text(alertMessage ?? "")
         }
     }
 
     private var profileCard: some View {
-        HStack(spacing: 15) {
-            ZStack {
-                Circle()
-                    .fill(accent.opacity(0.16))
-                    .frame(width: 66, height: 66)
-                Text(initials)
-                    .font(.system(size: 22, weight: .black, design: .rounded))
-                    .foregroundStyle(accent)
-            }
+        HStack(spacing: 14) {
+            Text(initials)
+                .font(.system(size: 22, weight: .black, design: .rounded))
+                .frame(width: 58, height: 58)
+                .background(accent, in: Circle())
+                .foregroundStyle(.black)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(accountStore.profile?.displayName ?? "Профиль")
                     .font(.title3.bold())
-                Text("Локальный профиль · данные на устройстве")
+                Text("Локальный кабинет · v0.6")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.48))
             }
@@ -138,7 +216,7 @@ struct AccountView: View {
                 Button {
                     selectedTab = .history
                 } label: {
-                    Text("Открыть историю")
+                    Text("Открыть историю и прогресс")
                         .font(.subheadline.bold())
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
@@ -149,6 +227,40 @@ struct AccountView: View {
             .padding(16)
             .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 20))
         }
+    }
+
+    private var backupCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Резервная копия", systemImage: "externaldrive.badge.icloud")
+                .font(.headline)
+                .foregroundStyle(accent)
+
+            Text("Экспорт включает индекс истории, заметки и полные JSON meshes. Файл шифруется паролем и подходит для восстановления после переустановки.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.50))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                backupPassword = ""
+                showingExportPassword = true
+            } label: {
+                Label("Создать зашифрованную копию", systemImage: "lock.doc")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(AccountPrimaryButtonStyle(accent: accent))
+            .disabled(historyStore.records.isEmpty)
+            .opacity(historyStore.records.isEmpty ? 0.45 : 1)
+
+            Button {
+                showingFileImporter = true
+            } label: {
+                Label("Восстановить из файла", systemImage: "arrow.down.doc")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(AccountSecondaryButtonStyle())
+        }
+        .padding(16)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 20))
     }
 
     private var privacyCard: some View {
@@ -166,7 +278,7 @@ struct AccountView: View {
             )
             .disabled(!biometricLock.isBiometricsAvailable)
 
-            Text("Скан-история хранится в Application Support приложения. При удалении приложения iOS удалит локальные данные вместе с ним.")
+            Text("До 50 последних анализов хранятся в Application Support приложения. Облачная синхронизация не используется.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.50))
                 .fixedSize(horizontal: false, vertical: true)
@@ -234,6 +346,51 @@ struct AccountView: View {
         .presentationDetents([.medium])
     }
 
+    private func passwordSheet(
+        title: String,
+        buttonTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        NavigationStack {
+            VStack(spacing: 18) {
+                SecureField("Минимум 6 символов", text: $backupPassword)
+                    .textContentType(.newPassword)
+                    .padding(14)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+
+                Text("Без этого пароля восстановить файл невозможно. Пароль нигде не сохраняется.")
+                    .font(.caption)
+                    .foregroundStyle(.orange.opacity(0.78))
+
+                Button(action: action) {
+                    Text(buttonTitle)
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 14))
+                        .foregroundStyle(.black)
+                }
+                .disabled(backupPassword.count < 6)
+                .opacity(backupPassword.count < 6 ? 0.45 : 1)
+
+                Spacer()
+            }
+            .padding(20)
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") {
+                        showingExportPassword = false
+                        showingImportPassword = false
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
     private func statistic(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -252,5 +409,27 @@ struct AccountView: View {
             .split(separator: " ")
             .prefix(2)
         return parts.compactMap(\.first).map(String.init).joined().uppercased()
+    }
+}
+
+private struct AccountPrimaryButtonStyle: ButtonStyle {
+    let accent: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline.bold())
+            .padding(.vertical, 12)
+            .background(accent.opacity(configuration.isPressed ? 0.75 : 1), in: RoundedRectangle(cornerRadius: 13))
+            .foregroundStyle(.black)
+    }
+}
+
+private struct AccountSecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline.bold())
+            .padding(.vertical, 12)
+            .background(.white.opacity(configuration.isPressed ? 0.06 : 0.10), in: RoundedRectangle(cornerRadius: 13))
+            .foregroundStyle(.white)
     }
 }

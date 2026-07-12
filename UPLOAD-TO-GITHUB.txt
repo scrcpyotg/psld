@@ -1,18 +1,11 @@
-PSL Scanner v0.5
+PSL Scanner v0.6
 
-1. Распакуйте архив обновления.
-2. В GitHub откройте Code -> Add file -> Upload files.
-3. Загрузите всё содержимое папки с сохранением структуры.
-4. Подтвердите замену существующих файлов.
-5. Нажмите Commit changes.
-6. Новая сборка IPA запустится автоматически.
+1. Распакуй psl-scanner-ios-v0.6-update.zip.
+2. GitHub → Code → Add file → Upload files.
+3. Перетащи всё содержимое распакованной папки.
+4. Разреши замену существующих файлов.
+5. Commit changes.
+6. Actions → дождись зелёной сборки.
+7. Скачай PSLScanner-unsigned.ipa из Artifacts.
 
-Новые папки/файлы:
-- PSLScanner/Account/LocalAccountStore.swift
-- PSLScanner/Account/ScanHistoryStore.swift
-- PSLScanner/Account/BiometricLock.swift
-- PSLScanner/Scanner/SurfaceMetricAnalyzer.swift
-- PSLScanner/UI/HistoryView.swift
-- PSLScanner/UI/AccountView.swift
-
-Важно: не загружайте сам ZIP как один файл.
+build-ipa.yml менять не нужно.

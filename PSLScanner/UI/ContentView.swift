@@ -129,7 +129,7 @@ private struct ProfileSetupView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Личный кабинет")
                         .font(.system(size: 36, weight: .black, design: .rounded))
-                    Text("Имя и последние 20 анализов сохраняются только на этом iPhone. Аккаунт не отправляется на сервер.")
+                    Text("Имя и последние 50 анализов сохраняются только на этом iPhone. Аккаунт не отправляется на сервер.")
                         .font(.body)
                         .foregroundStyle(.white.opacity(0.62))
                         .fixedSize(horizontal: false, vertical: true)
@@ -257,7 +257,7 @@ private struct ScannerCaptureView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("PSL SCANNER")
                     .font(.system(size: 18, weight: .black, design: .rounded))
-                Text("TrueDepth · v0.5 · серия \(scanner.completedReliabilityScans + 1)/\(scanner.requiredReliabilityScans)")
+                Text("TrueDepth · v0.6 · серия \(scanner.completedReliabilityScans + 1)/\(scanner.requiredReliabilityScans)")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
             }

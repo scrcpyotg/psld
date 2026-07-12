@@ -1,9 +1,11 @@
 import Foundation
 import Combine
+import CryptoKit
+import Security
 
 struct SavedScanRecord: Codable, Identifiable, Hashable {
     let id: UUID
-    let profileID: UUID
+    var profileID: UUID
     let sourceCreatedAt: Date
     let savedAt: Date
     let score: Float
@@ -18,7 +20,10 @@ struct SavedScanRecord: Codable, Identifiable, Hashable {
     let featureMetrics: [FeatureMetric]
     let surfaceMeasurements: [SurfaceMeasurement]
     let regionalSymmetry: [RegionalSymmetryMetric]
-    let documentFileName: String
+    var documentFileName: String
+    var note: String?
+    var weightKG: Double?
+    var isBaseline: Bool?
 }
 
 struct HistoryStatistics {
@@ -34,8 +39,9 @@ final class ScanHistoryStore: ObservableObject {
     @Published private(set) var records = [SavedScanRecord]()
     @Published private(set) var profileID: UUID?
     @Published var lastError: String?
+    @Published var lastMessage: String?
 
-    let maximumRecordCount = 20
+    let maximumRecordCount = 50
 
     private let encoder: JSONEncoder = {
         let value = JSONEncoder()
@@ -86,7 +92,10 @@ final class ScanHistoryStore: ObservableObject {
                 featureMetrics: document.metrics.featureMetrics,
                 surfaceMeasurements: document.metrics.surfaceMeasurements,
                 regionalSymmetry: document.metrics.regionalSymmetry,
-                documentFileName: fileName
+                documentFileName: fileName,
+                note: nil,
+                weightKG: nil,
+                isBaseline: records.isEmpty
             )
 
             records.insert(record, at: 0)
@@ -95,6 +104,34 @@ final class ScanHistoryStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func record(id: UUID) -> SavedScanRecord? {
+        records.first { $0.id == id }
+    }
+
+    var baselineRecord: SavedScanRecord? {
+        records.first { $0.isBaseline == true }
+    }
+
+    func setBaseline(_ record: SavedScanRecord) {
+        for index in records.indices {
+            records[index].isBaseline = records[index].id == record.id
+        }
+        persistIndex()
+        lastMessage = "Базовый анализ установлен."
+    }
+
+    func updateMetadata(recordID: UUID, note: String, weightKG: Double?) {
+        guard let index = records.firstIndex(where: { $0.id == recordID }) else { return }
+        let cleanNote = String(note.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
+        records[index].note = cleanNote.isEmpty ? nil : cleanNote
+        if let weightKG, weightKG >= 25, weightKG <= 350 {
+            records[index].weightKG = weightKG
+        } else {
+            records[index].weightKG = nil
+        }
+        persistIndex()
     }
 
     func document(for record: SavedScanRecord) -> FaceScanDocument? {
@@ -118,11 +155,15 @@ final class ScanHistoryStore: ObservableObject {
 
     func delete(_ record: SavedScanRecord) {
         guard let profileID else { return }
+        let wasBaseline = record.isBaseline == true
         records.removeAll { $0.id == record.id }
         let url = try? scansDirectory(profileID: profileID)
             .appendingPathComponent(record.documentFileName)
         if let url {
             try? FileManager.default.removeItem(at: url)
+        }
+        if wasBaseline, !records.isEmpty {
+            records[records.count - 1].isBaseline = true
         }
         persistIndex()
     }
@@ -151,10 +192,146 @@ final class ScanHistoryStore: ObservableObject {
     }
 
     func previousRecord(before record: SavedScanRecord) -> SavedScanRecord? {
-        guard let index = records.firstIndex(of: record) else { return nil }
+        guard let index = records.firstIndex(where: { $0.id == record.id }) else { return nil }
         let nextIndex = records.index(after: index)
         guard records.indices.contains(nextIndex) else { return nil }
         return records[nextIndex]
+    }
+
+    func createEncryptedBackup(password: String) -> URL? {
+        guard let profileID else {
+            lastError = "Профиль не выбран."
+            return nil
+        }
+        guard password.count >= 6 else {
+            lastError = "Пароль резервной копии должен содержать минимум 6 символов."
+            return nil
+        }
+
+        do {
+            var documents = [String: Data]()
+            let directory = try scansDirectory(profileID: profileID)
+            for record in records {
+                let url = directory.appendingPathComponent(record.documentFileName)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    documents[record.documentFileName] = try Data(contentsOf: url)
+                }
+            }
+
+            let payload = HistoryBackupPayload(
+                format: "psl-account-backup",
+                version: 1,
+                exportedAt: Date(),
+                records: records,
+                documents: documents
+            )
+            let payloadData = try encoder.encode(payload)
+            let salt = try randomData(count: 16)
+            let key = deriveKey(password: password, salt: salt)
+            let sealed = try AES.GCM.seal(payloadData, using: key)
+            guard let combined = sealed.combined else {
+                throw HistoryError.encryptionFailed
+            }
+
+            let envelope = EncryptedBackupEnvelope(
+                format: "psl-encrypted-backup",
+                version: 1,
+                salt: salt,
+                encryptedPayload: combined
+            )
+            let data = try encoder.encode(envelope)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmm"
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("PSL-Backup-\(formatter.string(from: Date())).pslbackup")
+            try? FileManager.default.removeItem(at: url)
+            try data.write(to: url, options: .atomic)
+            lastMessage = "Зашифрованная резервная копия создана."
+            return url
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func importEncryptedBackup(from url: URL, password: String) -> Bool {
+        guard let profileID else {
+            lastError = "Профиль не выбран."
+            return false
+        }
+        guard password.count >= 6 else {
+            lastError = "Введите пароль резервной копии."
+            return false
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let envelope = try decoder.decode(EncryptedBackupEnvelope.self, from: data)
+            guard envelope.format == "psl-encrypted-backup" else {
+                throw HistoryError.invalidBackup
+            }
+            let key = deriveKey(password: password, salt: envelope.salt)
+            let box = try AES.GCM.SealedBox(combined: envelope.encryptedPayload)
+            let payloadData = try AES.GCM.open(box, using: key)
+            let payload = try decoder.decode(HistoryBackupPayload.self, from: payloadData)
+            guard payload.format == "psl-account-backup" else {
+                throw HistoryError.invalidBackup
+            }
+
+            let directory = try scansDirectory(profileID: profileID)
+            var importedCount = 0
+
+            for sourceRecord in payload.records.sorted(by: { $0.savedAt < $1.savedAt }) {
+                guard !records.contains(where: { $0.sourceCreatedAt == sourceRecord.sourceCreatedAt }) else { continue }
+                guard let documentData = payload.documents[sourceRecord.documentFileName] else { continue }
+
+                let newID = UUID()
+                let newFileName = "scan-\(newID.uuidString).json"
+                try documentData.write(
+                    to: directory.appendingPathComponent(newFileName),
+                    options: .atomic
+                )
+
+                let imported = SavedScanRecord(
+                    id: newID,
+                    profileID: profileID,
+                    sourceCreatedAt: sourceRecord.sourceCreatedAt,
+                    savedAt: sourceRecord.savedAt,
+                    score: sourceRecord.score,
+                    scoreRangeLow: sourceRecord.scoreRangeLow,
+                    scoreRangeHigh: sourceRecord.scoreRangeHigh,
+                    category: sourceRecord.category,
+                    categoryIsFinal: sourceRecord.categoryIsFinal,
+                    reliability: sourceRecord.reliability,
+                    quality: sourceRecord.quality,
+                    repeatabilityScore: sourceRecord.repeatabilityScore,
+                    repeatabilityPassed: sourceRecord.repeatabilityPassed,
+                    featureMetrics: sourceRecord.featureMetrics,
+                    surfaceMeasurements: sourceRecord.surfaceMeasurements,
+                    regionalSymmetry: sourceRecord.regionalSymmetry,
+                    documentFileName: newFileName,
+                    note: sourceRecord.note,
+                    weightKG: sourceRecord.weightKG,
+                    isBaseline: nil
+                )
+                records.append(imported)
+                importedCount += 1
+            }
+
+            records.sort { $0.savedAt > $1.savedAt }
+            if baselineRecord == nil, !records.isEmpty {
+                records[records.count - 1].isBaseline = true
+            }
+            trimOldRecordsIfNeeded()
+            persistIndex()
+            lastMessage = importedCount > 0
+                ? "Импортировано анализов: \(importedCount)."
+                : "Новых анализов в резервной копии нет."
+            return true
+        } catch {
+            lastError = "Не удалось открыть резервную копию. Проверь пароль и файл."
+            return false
+        }
     }
 
     private func loadIndex() {
@@ -172,6 +349,10 @@ final class ScanHistoryStore: ObservableObject {
             let data = try Data(contentsOf: url)
             records = try decoder.decode([SavedScanRecord].self, from: data)
                 .sorted { $0.savedAt > $1.savedAt }
+            if baselineRecord == nil, !records.isEmpty {
+                records[records.count - 1].isBaseline = true
+                persistIndex()
+            }
         } catch {
             records = []
             lastError = error.localizedDescription
@@ -200,6 +381,25 @@ final class ScanHistoryStore: ObservableObject {
                 try? FileManager.default.removeItem(at: url)
             }
         }
+    }
+
+    private func deriveKey(password: String, salt: Data) -> SymmetricKey {
+        var material = Data(password.utf8)
+        material.append(salt)
+        var digest = Data(SHA256.hash(data: material))
+        for _ in 0..<12_000 {
+            var round = digest
+            round.append(salt)
+            digest = Data(SHA256.hash(data: round))
+        }
+        return SymmetricKey(data: digest)
+    }
+
+    private func randomData(count: Int) throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: count)
+        let result = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+        guard result == errSecSuccess else { throw HistoryError.encryptionFailed }
+        return Data(bytes)
     }
 
     private func indexURL(profileID: UUID) throws -> URL {
@@ -240,10 +440,34 @@ final class ScanHistoryStore: ObservableObject {
     }
 }
 
+private struct HistoryBackupPayload: Codable {
+    let format: String
+    let version: Int
+    let exportedAt: Date
+    let records: [SavedScanRecord]
+    let documents: [String: Data]
+}
+
+private struct EncryptedBackupEnvelope: Codable {
+    let format: String
+    let version: Int
+    let salt: Data
+    let encryptedPayload: Data
+}
+
 private enum HistoryError: LocalizedError {
     case applicationSupportUnavailable
+    case encryptionFailed
+    case invalidBackup
 
     var errorDescription: String? {
-        "Не удалось открыть локальное хранилище приложения."
+        switch self {
+        case .applicationSupportUnavailable:
+            return "Не удалось открыть локальное хранилище приложения."
+        case .encryptionFailed:
+            return "Не удалось зашифровать резервную копию."
+        case .invalidBackup:
+            return "Формат резервной копии не поддерживается."
+        }
     }
 }
